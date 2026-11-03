@@ -17,7 +17,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Manifest,
     [ValidateSet('junction', 'copy')][string]$Mode = 'junction',
     [string[]]$BlockProcesses = @(),
-    [switch]$KeepLinks
+    [switch]$KeepLinks,
+    [switch]$ResumeFromCopy
 )
 
 $ErrorActionPreference = 'Stop'
@@ -186,7 +187,12 @@ if (-not $KeepLinks) {
 }
 if (Test-Path -LiteralPath $Target) {
     $existing = @(Get-ChildItem -LiteralPath $Target -Force -ErrorAction SilentlyContinue)
-    if ($existing.Count -gt 0) { Fail $EC_PRECHECK ('target exists and is not empty: ' + $Target) }
+    if (-not $ResumeFromCopy) {
+        if ($existing.Count -gt 0) { Fail $EC_PRECHECK ('target exists and is not empty: ' + $Target) }
+    }
+    elseif ($existing.Count -eq 0) {
+        Fail $EC_PRECHECK ('-ResumeFromCopy requires an existing non-empty copied target: ' + $Target)
+    }
 }
 
 $srcN = $Source.TrimEnd('\').ToLowerInvariant()
@@ -205,7 +211,7 @@ if ($BlockProcesses.Count -gt 0) {
 
 $srcBytes = Get-DirBytes $Source
 $needed = [long]($srcBytes * 1.1) + 256MB
-if ($di.AvailableFreeSpace -lt $needed) {
+if (-not $ResumeFromCopy -and $di.AvailableFreeSpace -lt $needed) {
     Fail $EC_PRECHECK ('not enough space on {0}: need ~{1}, free {2}' -f $tgtRoot, (Format-Bytes $needed), (Format-Bytes $di.AvailableFreeSpace))
 }
 
@@ -214,14 +220,19 @@ Write-Host ('[precheck] ok. source={0} ({1})  target={2}  mode={3}' -f $Source, 
 # ---------------------------------------------------------------------
 # copy
 # ---------------------------------------------------------------------
-$roboArgs = @($Source, $Target, '/E', '/COPY:DAT', '/DCOPY:DAT', '/XJ', '/R:1', '/W:1', '/MT:16', '/NP', '/NFL', '/NDL')
-robocopy @roboArgs | Out-Null
-$rc = $LASTEXITCODE
-if ($rc -ge 8) {
-    Remove-Item -LiteralPath $Target -Recurse -Force -ErrorAction SilentlyContinue
-    Fail $EC_COPY ('robocopy failed with exit code {0}. Source left untouched, partial target removed.' -f $rc)
+if (-not $ResumeFromCopy) {
+    $roboArgs = @($Source, $Target, '/E', '/COPY:DAT', '/DCOPY:DAT', '/XJ', '/R:1', '/W:1', '/MT:16', '/NP', '/NFL', '/NDL')
+    robocopy @roboArgs | Out-Null
+    $rc = $LASTEXITCODE
+    if ($rc -ge 8) {
+        Remove-Item -LiteralPath $Target -Recurse -Force -ErrorAction SilentlyContinue
+        Fail $EC_COPY ('robocopy failed with exit code {0}. Source left untouched, partial target removed.' -f $rc)
+    }
+    Write-Host ('[copy] robocopy finished, exit code {0}.' -f $rc)
 }
-Write-Host ('[copy] robocopy finished, exit code {0}.' -f $rc)
+else {
+    Write-Host '[resume] skipping copy, using existing copied target.'
+}
 
 # ---------------------------------------------------------------------
 # -KeepLinks: robocopy /XJ skipped nested links during the copy; recreate
@@ -292,14 +303,28 @@ if ($Mode -eq 'junction') {
     $parent = Split-Path -Parent $Source
     $leaf = Split-Path -Leaf $Source
     $bakPath = Join-Path $parent ($leaf + '.reloc-bak')
-    if (Test-Path -LiteralPath $bakPath) {
-        Fail $EC_PRECHECK ('backup path already exists: ' + $bakPath)
+    $renameDone = $false
+    if (-not (Test-Path -LiteralPath $Source)) {
+        # -ResumeFromCopy after a boot-time rename (PendingFileRenameOperations):
+        # source path already renamed to the backup by the session manager.
+        if ($ResumeFromCopy -and (Test-Path -LiteralPath $bakPath) -and (Test-Path -LiteralPath $Target)) {
+            $renameDone = $true
+            Write-Host '[resume] rename already performed at boot, continuing with junction.'
+        }
+        else {
+            Fail $EC_PRECHECK ('source does not exist: ' + $Source)
+        }
     }
-    Rename-Item -LiteralPath $Source -NewName ($leaf + '.reloc-bak')
+    if (-not $renameDone) {
+        if (Test-Path -LiteralPath $bakPath) {
+            Fail $EC_PRECHECK ('backup path already exists: ' + $bakPath)
+        }
+        Rename-Item -LiteralPath $Source -NewName ($leaf + '.reloc-bak')
+    }
     cmd /c mklink /J "$Source" "$Target" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         if (Test-Path -LiteralPath $Source) { cmd /c rmdir "$Source" 2>$null | Out-Null }
-        Rename-Item -LiteralPath $bakPath -NewName $leaf
+        if (-not $renameDone) { Rename-Item -LiteralPath $bakPath -NewName $leaf }
         Fail $EC_POST ('junction creation failed (mklink exit {0}). Rolled back to original directory.' -f $LASTEXITCODE)
     }
     try {
@@ -307,7 +332,7 @@ if ($Mode -eq 'junction') {
     }
     catch {
         cmd /c rmdir "$Source" | Out-Null
-        Rename-Item -LiteralPath $bakPath -NewName $leaf
+        if (-not $renameDone) { Rename-Item -LiteralPath $bakPath -NewName $leaf }
         Remove-Item -LiteralPath $Target -Recurse -Force -ErrorAction SilentlyContinue
         Fail $EC_POST ('sentinel verification failed ({0}). Rolled back: link removed, original dir restored, target data removed.' -f $_.Exception.Message)
     }
