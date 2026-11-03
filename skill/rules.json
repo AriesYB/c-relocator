@@ -52,7 +52,7 @@
       },
       "verify": ["npm config get prefix", "npm config get cache"],
       "risk": "low",
-      "notes": "Windows 下 npm 默认 prefix 是 %APPDATA%\\npm（全局命令所在）；改 prefix 后必须同步改用户 PATH，否则 npm i -g 装的 CLI 全部失效。"
+      "notes": "Windows 下 npm 默认 prefix 是 %APPDATA%\\npm（全局命令所在）；改 prefix 后必须同步改用户 PATH，否则 npm i -g 装的 CLI 全部失效。nvm-windows 用户实际 prefix 可能是 nvm 根目录（动手前先 npm config get prefix 确认），PATH 里挂的 npm 目录不一定是活 prefix 但其中的全局命令可能仍被使用。npm 生成的 .cmd shim 用 %~dp0 相对路径，整目录平移 + PATH 改指即可无损；验证 shim 用 PowerShell & 调用（个别宿主直跑 .cmd 会报 0xC0000142 假失败）。"
     },
     {
       "id": "pip-cache",

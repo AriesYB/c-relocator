@@ -85,8 +85,17 @@ manifest 不存在时先初始化：
    ```
 
 3. config 型：按 `config.steps` 顺序执行，遵守下方「config 步骤执行规范」。
-4. 验证：运行 `verify` 中的命令确认生效。
-5. 汇报结果，并提醒：确认软件正常后，再让用户同意删除备份（铁律 2）。
+4. 验证按两层口径：
+   - 配置生效：运行 `verify` 中的命令（如 `pip cache dir`、`npm config get prefix`）。
+   - 数据可用：能实测就实测（如对新位置的全局命令跑一次 `--version`）。注意 `.cmd` shim 在个别
+     宿主 shell 直跑可能报 0xC0000142 假失败——用 PowerShell `& '<shim>' --version` 复核，并与
+     旧位置结果一致才算平移无损。
+   - env 型配置只对新进程生效（已开着的 IDE / 终端要重启才读到），向用户说明。
+5. 汇报结果（带上 C 盘当前剩余空间，紧张时提示尽快确认），并提醒：确认软件正常后，
+   再让用户同意删除备份（铁律 2）。
+6. 删除确认可攒批：可再生数据（pip/npm/gradle 的缓存与依赖）验证通过后可合并为一次确认；
+   npm 全局包这类有状态数据，确认前必须完成配置验证与命令实测。多条一次迁完时汇总一张
+   验证表、一次确认，避免逐条打断。
 
 ### undo `<id>`
 1. `Undo-Reloc.ps1 -Action undo -Id <id> -Manifest <manifest>`（还原数据/链接，并按条目 `configUndo` 记录还原环境变量、PATH、配置文件）。
@@ -128,11 +137,16 @@ manifest 不存在时先初始化：
 - `type=path_update`（改用户 PATH，务必先备份整条 PATH）：
 
   ```powershell
-  $old = [Environment]::GetEnvironmentVariable('Path', 'User')
+  # 第一步先查存储形态：reg query HKCU\Environment /v Path
+  # 若为 REG_EXPAND_SZ，严禁用 [Environment]::SetEnvironmentVariable 回写（它固定写 REG_SZ，
+  # 会把 %VAR% 条目变成不可展开的死文本）；一律走 Registry API 按原 kind 回写：
+  $reg = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+  $old = $reg.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  $kind = $reg.GetValueKind('Path')
   Set-Content -LiteralPath '<reloc根>\undo\<id>\user-path-<时间戳>.txt' -Value $old -Encoding UTF8
   $new = ($old -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne '<旧条目>' }) -join ';'
   if ($new -notlike '*<新条目>*') { $new = '<新条目>;' + $new }
-  [Environment]::SetEnvironmentVariable('Path', $new, 'User')
+  $reg.SetValue('Path', $new, $kind)   # String 或 ExpandString，按查到的原值
   # 记入 configUndo：@{type='path'; previousValue=$old}
   ```
 
@@ -174,3 +188,4 @@ Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>]
 - 卸载软件前先查 manifest 是否涉及链接目录，必要时先 undo 再卸载（个别卸载器会穿透链接清掉目标盘数据）。
 - WSL / Docker 用官方迁移（`wsl --export/--import`；Docker 设置里改 disk image location），规则库有标注，不要用 junction 硬搬虚拟磁盘所在目录。
 - 浏览器等 medium risk 条目：默认只在 audit 提示，不主动 migrate。
+- Git Bash 里调 cmd 内建命令用 `cmd //c '...'`（双斜杠防 MSYS 路径转义），路径参数用反斜杠形式。

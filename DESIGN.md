@@ -307,6 +307,16 @@ Office ClickToRun（`Program Files\Microsoft Office`、`Common Files\microsoft s
 先复制后改名（失败零损失回滚）· `/XJ` 防穿透 · 哨兵验证通过才算成功 ·
 两步删除 · manifest 全程台账 · agent 审批机制作为最外层人工闸门。
 
+### 7.4 实现陷阱备忘（脚本维护者向，2026-11-03 实战沉淀）
+
+- PowerShell 变量名大小写不敏感且参数可带类型约束：局部变量与参数同名（如 `$rules` 撞上
+  `[string]$Rules`）会把数组赋值强转成拼接字符串，循环静默跑错。写脚本时变量命名避开参数名。
+- `[Environment]::SetEnvironmentVariable('Path', …)` 固定写 REG_SZ；原值若是 REG_EXPAND_SZ 且含
+  %VAR% 条目会被破坏。PATH 回写一律走 Registry API 按 GetValueKind 回写（SKILL.md 片段已按此实现）。
+- robocopy 退出码 0~7 均为成功语义，≥8 才是失败。
+- npm 生成的 `.cmd` shim 用 `%~dp0` 相对路径，整目录平移 + PATH 改指即无损；个别宿主 shell 直跑
+  `.cmd` 会报 0xC0000142 假失败，验证用 PowerShell `&` 调用并对比新旧位置。
+
 ---
 
 ## 8. 风险与边界（诚实清单）
