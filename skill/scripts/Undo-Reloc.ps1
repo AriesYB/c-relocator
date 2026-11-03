@@ -10,7 +10,8 @@
 param(
     [Parameter(Mandatory = $true)][ValidateSet('undo', 'rebuild', 'confirm')][string]$Action,
     [Parameter(Mandatory = $true)][string]$Manifest,
-    [string]$Id
+    [string]$Id,
+    [switch]$AllowLinkTree
 )
 
 $ErrorActionPreference = 'Stop'
@@ -231,9 +232,15 @@ switch ($Action) {
                         Write-Host ('[fail] backup unexpectedly a reparse point, manual review: ' + $bak); continue
                     }
                     if (Test-TreeContainsReparse $bak) {
-                        Write-Host ('[fail] backup tree contains reparse points, manual review: ' + $bak); continue
+                        if (-not $AllowLinkTree) {
+                            Write-Host ('[fail] backup tree contains reparse points; rerun with -AllowLinkTree to delete via "rmdir /s /q" (never follows links): ' + $bak); continue
+                        }
+                        cmd /c rmdir /s /q "$($bak)"
+                        if (Test-Path -LiteralPath $bak) { Write-Host ('[fail] rmdir failed, manual review: ' + $bak); continue }
                     }
-                    Remove-Item -LiteralPath $bak -Recurse -Force
+                    else {
+                        Remove-Item -LiteralPath $bak -Recurse -Force
+                    }
                     Write-Host ('[confirm] backup deleted: ' + $bak)
                 }
                 else {
@@ -247,9 +254,15 @@ switch ($Action) {
                 }
                 if (Test-Path -LiteralPath $e.source) {
                     if (Test-TreeContainsReparse $e.source) {
-                        Write-Host ('[fail] source tree contains reparse points, manual review: ' + $e.source); continue
+                        if (-not $AllowLinkTree) {
+                            Write-Host ('[fail] source tree contains reparse points; rerun with -AllowLinkTree to delete via "rmdir /s /q" (never follows links): ' + $e.source); continue
+                        }
+                        cmd /c rmdir /s /q "$($e.source)"
+                        if (Test-Path -LiteralPath $e.source) { Write-Host ('[fail] rmdir failed, manual review: ' + $e.source); continue }
                     }
-                    Remove-Item -LiteralPath $e.source -Recurse -Force
+                    else {
+                        Remove-Item -LiteralPath $e.source -Recurse -Force
+                    }
                     Write-Host ('[confirm] stale source deleted: ' + $e.source)
                 }
                 else {

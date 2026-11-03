@@ -198,8 +198,12 @@ Move-Reloc.ps1 -Id <id> -Source <C盘源目录> -Target <目标盘目录> -Manif
                [-Mode junction|copy] [-BlockProcesses node,java,...] [-KeepLinks]
 Scan-Reloc.ps1 -Rules <rules.json> [-Manifest <manifest>] [-Ids npm,pip]
                [-TopDirs] [-TopRoots <目录,...>] [-Top 20] [-SkipSizes]
-Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>]
+Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>] [-AllowLinkTree]
 ```
+
+`-AllowLinkTree`：删除含嵌套链接的树（bun/pnpm 风格）时必须显式携带——此时脚本改用
+`rmdir /s /q`（Vista 起不跟链接，只删链接本身），PS 5.1 的 `Remove-Item -Recurse` 会穿透
+链接删到目标盘真实数据，绝不能用于链接树。
 
 退出码：Move — 0 成功 / 10 预检失败 / 11 复制失败（已自动清理半成品，源未动）/ 12 后置步骤失败（已回滚）。Undo — 0 成功 / 20 失败（看输出）。
 
