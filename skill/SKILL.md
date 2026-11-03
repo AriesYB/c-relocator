@@ -72,8 +72,25 @@ manifest 不存在时先初始化：
 
 ### audit（只读，无写操作）
 1. `Scan-Reloc.ps1 -Rules <rules.json> -Manifest <manifest>` — 规则库条目体检（体积 / 状态 / 机制建议）。
-2. 找规则库没覆盖的漏网之鱼：加 `-TopDirs -Top 25`（对 `%LOCALAPPDATA%`、`%APPDATA%`、`%USERPROFILE%` 做子目录体积排行；大目录较慢，可加 `-SkipSizes` 先看清单）。
-3. 输出建议表：条目 / 机制 / 体积 / 风险 / 建议。新发现的可迁条目先补进 `rules.json` 再 migrate。
+2. 输出建议表：条目 / 机制 / 体积 / 风险 / 建议。新发现的可迁条目先补进 `rules.json` 再 migrate。
+
+### discover（发现规则库之外的长尾，只读）
+1. `Scan-Reloc.ps1 -Rules <rules.json> -Manifest <manifest> -TopDirs -Top 30` — 对 `%LOCALAPPDATA%`、
+   `%APPDATA%`、`%USERPROFILE%` 做子目录体积排行（含文件数 / .exe 数 / 最近写入；deny 目录与
+   链接自动剪枝）。大目录较慢时可先 `-SkipSizes` 看清单再挑着量。按体积从大到小逐个处理。
+2. 对每个大目录做**归属识别**（手段从强到弱）：
+   - 名字即线索：`%LOCALAPPDATA%\<App>`、`%LOCALAPPDATA%\Programs\<App>` 多为厂商/产品名；
+   - 目录内找标记：`.exe` 的产品属性、settings/config 文件、package 标识、日志内容；
+   - 反查注册表卸载表：`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` 与
+     `HKCU\...\Uninstall` 的 `InstallLocation` / `DisplayIcon` 是否指向该路径；
+   - 仍不确定就联网检索：`<目录名> AppData folder which software`、`<App> move cache/data to another drive`。
+3. **分类判断**：文件数巨大、无 .exe、近期有写入 → 数据/缓存（首选 config，无配置则 junction）；
+   含 .exe/运行时 → 程序本体（junction 可行，但卸载器穿透风险升一级，risk=medium）；
+   属于系统/托管的 → deny。识别不确定的一律 risk=medium（migrate 前必问用户）。
+4. 向用户输出**提案表**（目录 / 归属结论 / 体积 / 建议机制 / 风险 / 依据来源），用户逐条确认后：
+   确认迁的先写入 `rules.json`（机制、config 步骤、data 映射、verify、risk、notes 带上依据），
+   再走标准 migrate 流程。用户没确认的只记录在案，绝不擅自迁移。
+5. `audit` 与 `discover` 均只读；唯一写操作是用户确认后更新 `rules.json`。
 
 ### migrate `<id>`
 1. 从 `rules.json` 取条目，向用户复述将要执行的动作（机制、源、目标、体积）；risk=medium 及以上必须先获用户确认。
