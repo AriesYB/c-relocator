@@ -260,26 +260,21 @@
     },
     {
       "id": "vscode-extensions",
-      "name": "VS Code 扩展目录（~\\.vscode）",
-      "mechanism": "config",
+      "name": "VS Code 扩展与用户数据（~\\.vscode 整目录）",
+      "mechanism": "junction",
       "detect": {
         "paths": ["%USERPROFILE%\\.vscode"],
         "processes": ["Code"]
       },
-      "config": {
-        "steps": [
-          { "type": "env", "name": "VSCODE_EXTENSIONS", "value": "{reloc}\\vscode-extensions" }
-        ]
-      },
       "data": {
-        "mode": "copy",
+        "mode": "junction",
         "targets": {
           "%USERPROFILE%\\.vscode": "{reloc}\\vscode-extensions"
         }
       },
-      "verify": ["重开 VS Code 后执行 code --list-extensions 确认扩展齐全"],
+      "verify": ["重开 VS Code 确认扩展面板齐全、argv.json 保留"],
       "risk": "low",
-      "notes": "VSCODE_EXTENSIONS 是官方支持的环境变量（vscode issue #266395、企业版文档）；迁移前 VS Code 全部进程必须退出；env 设置后下次启动 VS Code 生效。"
+      "notes": "曾用官方环境变量 VSCODE_EXTENSIONS 做 config（vscode issue #266395），实测它只覆盖 extensions 层：根下的 argv.json、cli、extensions.json 会滞留 C 盘，且 env 指向父层时扩展显示为空；任何不经该环境变量启动的 VS Code 还会踩回 C 盘旧位置。故整目录 junction 兜底，单一机制不依赖 env 传播。迁移前 VS Code 全部进程必须退出。"
     },
     {
       "id": "wpsdrive",
