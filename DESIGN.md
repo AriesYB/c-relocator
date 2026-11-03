@@ -317,6 +317,11 @@ Office ClickToRun（`Program Files\Microsoft Office`、`Common Files\microsoft s
 - robocopy 退出码 0~7 均为成功语义，≥8 才是失败。
 - npm 生成的 `.cmd` shim 用 `%~dp0` 相对路径，整目录平移 + PATH 改指即无损；个别宿主 shell 直跑
   `.cmd` 会报 0xC0000142 假失败，验证用 PowerShell `&` 调用并对比新旧位置。
+- 目录锁排查链（2026-11-03 腾讯目录实战）：Restart Manager 只能看文件句柄，目录句柄要
+  Sysinternals handle.exe（管理员，UTF-16 输出）；本案真凶是搜狗输入法云组件 SogouCloud/SGTool
+  （嵌腾讯 beacon SDK，持 SQLite WAL 句柄，随打字行为重建目录）——按名字杀进程会漏掉这类
+  "名字不相关"的持有者，进程名单要含输入法云组件，且"杀进程 → 改名让位 → 建链接"须在同一次
+  脚本调用内完成以压掉竞态窗口。
 
 ---
 

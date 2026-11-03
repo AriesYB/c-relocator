@@ -296,6 +296,60 @@
       "verify": ["新位置出现 E:\\Reloc\\wpsdrive 且内容完整，WPS 同步正常；旧目录确认后删除"],
       "risk": "low",
       "notes": "走 WPS 原生迁移最可靠（同步客户端会正确重建索引），不用 junction 是为规避同步客户端兼容风险。AI 只引导 + 验证 + 记录 manifest，数据迁移由 WPS 自身完成。"
+    },
+    {
+      "id": "tencent-appdata",
+      "name": "腾讯系运行数据（Roaming\\Tencent）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%APPDATA%\\Tencent"],
+        "processes": ["QQ*", "Weixin*", "WeChat*", "WXWork*", "WeMail*", "wecom*", "wemeet*", "TIM*", "TXPlatform*", "SogouCloud*", "SGTool*"]
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "%APPDATA%\\Tencent": "{reloc}\\tencent-appdata"
+        }
+      },
+      "verify": [],
+      "risk": "medium",
+      "notes": "微信/企业微信退出要托盘右键（点X只是缩托盘）。beacon/qimei SDK 目录会被搜狗输入法云组件（SogouCloud*/SGTool*）持有 SQLite WAL 句柄，且随打字行为重建目录——进程名单必须包含它们，改名与建链接要在同一次脚本调用内完成（-ResumeFromCopy）。重启窗口目录重新生成属正常，走 boot-rename 续跑分支。卸载腾讯系软件前先撤链接。"
+    },
+    {
+      "id": "qq-appdata",
+      "name": "QQ 运行数据（Roaming\\QQ）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%APPDATA%\\QQ"],
+        "processes": ["QQ*", "TIM*"]
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "%APPDATA%\\QQ": "{reloc}\\qq-appdata"
+        }
+      },
+      "verify": [],
+      "risk": "low",
+      "notes": "QQ 新版 (NT QQ) 聊天记录主存储在 Documents\\Tencent Files（可在设置里改位置），此处只是运行数据。"
+    },
+    {
+      "id": "qqex-appdata",
+      "name": "QQ 扩展数据（Roaming\\QQEX）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%APPDATA%\\QQEX"],
+        "processes": ["QQ*"]
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "%APPDATA%\\QQEX": "{reloc}\\qqex-appdata"
+        }
+      },
+      "verify": [],
+      "risk": "low",
+      "notes": "与 qq-appdata 同批迁移（同一批进程退出即可）。"
     }
   ]
 }

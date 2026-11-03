@@ -153,10 +153,20 @@ function Update-Manifest([string]$path, [string]$entryId, [string]$src, [hashtab
 # resolve & normalize
 # ---------------------------------------------------------------------
 $srcItem = Get-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue
-if ($null -eq $srcItem -or -not $srcItem.PSIsContainer) {
-    Fail $EC_PRECHECK ("source does not exist or is not a directory: '{0}'" -f $Source)
+if ($null -eq $srcItem) {
+    if (-not $ResumeFromCopy) {
+        Fail $EC_PRECHECK ("source does not exist or is not a directory: '{0}'" -f $Source)
+    }
+    # -ResumeFromCopy: source may already be renamed aside (e.g. by the caller
+    # after clearing a handle locker, or at boot); the junction-mode section
+    # validates that the backup and target exist before proceeding.
 }
-$Source = $srcItem.FullName
+elseif (-not $srcItem.PSIsContainer) {
+    Fail $EC_PRECHECK ("source is not a directory: '{0}'" -f $Source)
+}
+else {
+    $Source = $srcItem.FullName
+}
 $Target = $Target.TrimEnd('\')
 
 if ([System.IO.Path]::GetPathRoot($Source).TrimEnd('\') -eq $Source.TrimEnd('\')) {
