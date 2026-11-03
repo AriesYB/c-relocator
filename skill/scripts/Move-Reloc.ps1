@@ -16,7 +16,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Target,
     [Parameter(Mandatory = $true)][string]$Manifest,
     [ValidateSet('junction', 'copy')][string]$Mode = 'junction',
-    [string[]]$BlockProcesses = @()
+    [string[]]$BlockProcesses = @(),
+    [switch]$KeepLinks
 )
 
 $ErrorActionPreference = 'Stop'
@@ -178,8 +179,10 @@ if ($di.DriveType -ne [System.IO.DriveType]::Fixed) { Fail $EC_PRECHECK ('target
 if ($di.DriveFormat -ne 'NTFS') { Fail $EC_PRECHECK ('target drive is not NTFS (junction requires NTFS): ' + $tgtRoot) }
 
 if (Test-ReparsePoint $Source) { Fail $EC_PRECHECK ('source is already a link/reparse point: ' + $Source) }
-if (Test-TreeContainsReparse $Source) {
-    Fail $EC_PRECHECK ('source tree contains nested reparse points; robocopy /XJ would skip them - unsupported, handle manually: ' + $Source)
+if (-not $KeepLinks) {
+    if (Test-TreeContainsReparse $Source) {
+        Fail $EC_PRECHECK ('source tree contains nested reparse points; rerun with -KeepLinks to recreate them on the target side: ' + $Source)
+    }
 }
 if (Test-Path -LiteralPath $Target) {
     $existing = @(Get-ChildItem -LiteralPath $Target -Force -ErrorAction SilentlyContinue)
@@ -219,6 +222,68 @@ if ($rc -ge 8) {
     Fail $EC_COPY ('robocopy failed with exit code {0}. Source left untouched, partial target removed.' -f $rc)
 }
 Write-Host ('[copy] robocopy finished, exit code {0}.' -f $rc)
+
+# ---------------------------------------------------------------------
+# -KeepLinks: robocopy /XJ skipped nested links during the copy; recreate
+# each one on the target side. Junction/symlink targets that point INTO
+# the source get rewritten to the new target path, so the migrated tree
+# is self-contained and the original can be deleted. External targets are
+# kept as-is with a warning. File symlinks need admin/dev mode to create.
+# ---------------------------------------------------------------------
+if ($KeepLinks) {
+    $links = @(Get-ChildItem -LiteralPath $Source -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue)
+    $createdCount = 0
+    $warnCount = 0
+    $srcPrefix = $Source.TrimEnd('\')
+    $tgtPrefix = $Target.TrimEnd('\')
+    foreach ($l in $links) {
+        $rel = $l.FullName.Substring($Source.Length).TrimStart('\')
+        $dst = Join-Path $Target $rel
+        $t = $l.Target
+        if ($t -is [array]) { $t = [string]$t[0] }
+        $newTarget = $t
+        if ($t -and $t.TrimEnd('\').ToLowerInvariant().StartsWith($srcPrefix.ToLowerInvariant() + '\')) {
+            $newTarget = $tgtPrefix + $t.Substring($srcPrefix.Length)
+        }
+        elseif ($t) {
+            Write-Host ('[links] WARN target outside source, kept as-is: ' + $l.FullName)
+        }
+        $parent = Split-Path -Parent $dst
+        if (-not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        if ($l.LinkType -eq 'Junction') {
+            try {
+                New-Item -ItemType Junction -Path $dst -Value $newTarget -ErrorAction Stop | Out-Null
+                $createdCount++
+            }
+            catch {
+                Fail $EC_COPY ('failed to recreate junction: ' + $dst + ' (' + $_.Exception.Message + ')')
+            }
+        }
+        elseif ($l.LinkType -eq 'SymbolicLink') {
+            try {
+                if ($l.PSIsContainer) {
+                    cmd /c mklink /D "$dst" "$newTarget" | Out-Null
+                }
+                else {
+                    cmd /c mklink "$dst" "$newTarget" | Out-Null
+                }
+                if ($LASTEXITCODE -ne 0) { throw ('mklink exit ' + $LASTEXITCODE) }
+                $createdCount++
+            }
+            catch {
+                $warnCount++
+                Write-Host ('[links] WARN symlink recreate failed (needs admin/dev mode): ' + $dst)
+            }
+        }
+        else {
+            $warnCount++
+            Write-Host ('[links] WARN unknown link type "' + $l.LinkType + '": ' + $l.FullName)
+        }
+    }
+    Write-Host ('[links] recreated {0} link(s), {1} warning(s).' -f $createdCount, $warnCount)
+}
 
 # ---------------------------------------------------------------------
 # post steps

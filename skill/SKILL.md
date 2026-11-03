@@ -174,6 +174,11 @@ manifest 不存在时先初始化：
   # 修改后记入 configUndo：@{type='file'; original='<原路径>'; backup='<备份路径>'}
   ```
 
+- `type=manual`（AI 无法代劳的 UI 操作，如 WPS 云文档缓存位置）：AI 引导用户在软件界面里
+  完成设置 → 等用户确认完成 → 验证结果（新位置出现数据、软件同步正常）→ 在 manifest 记录
+  一条 config 型条目（status=active，notes 标注 manual/software-native-migration）入台账。
+  `data.mode=manual` 标记此类：数据迁移由软件自身机制完成，Move-Reloc 不参与。
+
 manifest 安全更新写法（不要手拼 JSON 字符串）：
 
 ```powershell
@@ -190,7 +195,7 @@ $m | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath '<manifest>' -Encoding U
 
 ```
 Move-Reloc.ps1 -Id <id> -Source <C盘源目录> -Target <目标盘目录> -Manifest <manifest>
-               [-Mode junction|copy] [-BlockProcesses node,java,...]
+               [-Mode junction|copy] [-BlockProcesses node,java,...] [-KeepLinks]
 Scan-Reloc.ps1 -Rules <rules.json> [-Manifest <manifest>] [-Ids npm,pip]
                [-TopDirs] [-TopRoots <目录,...>] [-Top 20] [-SkipSizes]
 Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>]
@@ -201,7 +206,10 @@ Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>]
 ## 边界与已知风险
 
 - junction 依赖 NTFS 本地固定盘；复制期间 C/D 两盘同时占空间；目标盘空间需 ≥ 源 × 1.1。
-- 源目录树内有嵌套链接时脚本会拒绝迁移（robocopy `/XJ` 会跳过它们导致缺文件）。
+- 源目录树内有嵌套链接时脚本默认拒绝迁移（robocopy `/XJ` 会跳过它们导致缺文件）。确认链接
+  无循环指向后可加 `-KeepLinks`：复制时照旧跳过链接，复制完在目标侧逐个重建——指向源内部的
+  链接目标改写为新路径（迁移后自洽，旧数据可删），源外目标原样保留并告警；bun / pnpm 风格的
+  缓存树（junction 海量）就是典型场景。文件符号链接的重建需要管理员/开发者模式，失败会告警跳过。
 - 卸载软件前先查 manifest 是否涉及链接目录，必要时先 undo 再卸载（个别卸载器会穿透链接清掉目标盘数据）。
 - WSL / Docker 用官方迁移（`wsl --export/--import`；Docker 设置里改 disk image location），规则库有标注，不要用 junction 硬搬虚拟磁盘所在目录。
 - 浏览器等 medium risk 条目：默认只在 audit 提示，不主动 migrate。

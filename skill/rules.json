@@ -192,6 +192,115 @@
       "verify": [],
       "risk": "low",
       "notes": "HF_HOME 指向根目录，hub/datasets 缓存在其子目录下，因此按子目录映射；python 进程在跑时先确认是否训练任务。"
+    },
+    {
+      "id": "maven-m2",
+      "name": "Maven 本地仓库（.m2\\repository，settings.xml 指路）",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%USERPROFILE%\\.m2\\repository"],
+        "processes": ["java"]
+      },
+      "config": {
+        "steps": [
+          { "type": "file_edit", "note": "~/.m2/settings.xml 不存在则创建最小内容 <settings><localRepository>{reloc}\\m2\\repository</localRepository></settings>（本地路径用正斜杠）；已存在则只改 localRepository 元素" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%USERPROFILE%\\.m2\\repository": "{reloc}\\m2\\repository"
+        }
+      },
+      "verify": ["读回 ~/.m2/settings.xml 确认 localRepository 指向新位置"],
+      "risk": "low",
+      "notes": "settings.xml 本体保留在 ~/.m2 不动（Maven 默认从那里读）；IDEA 某些项目可能用自己的 Maven 覆盖设置，若有项目报仓库路径异常去 IDEA 的 Maven 设置里检查。"
+    },
+    {
+      "id": "maven-wrapper",
+      "name": "Maven wrapper 发行版缓存（.m2\\wrapper）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%USERPROFILE%\\.m2\\wrapper"],
+        "processes": ["java"]
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "%USERPROFILE%\\.m2\\wrapper": "{reloc}\\m2\\wrapper"
+        }
+      },
+      "verify": [],
+      "risk": "low",
+      "notes": "mvnw 脚本与 IntelliJ 硬编码 ~/.m2/wrapper，无官方可迁移配置，按本项目规则 junction 兜底。"
+    },
+    {
+      "id": "bun",
+      "name": "Bun 运行时与缓存（~\\.bun）",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%USERPROFILE%\\.bun"],
+        "processes": ["bun"]
+      },
+      "config": {
+        "steps": [
+          { "type": "env", "name": "BUN_INSTALL", "value": "{reloc}\\bun-home" },
+          { "type": "path_update", "note": "用户 PATH 中 %USERPROFILE%\\.bun\\bin 条目替换为 {reloc}\\bun-home\\bin（先备份原 PATH；若原条目指向空目录，替换后等价无害）" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%USERPROFILE%\\.bun": "{reloc}\\bun-home"
+        }
+      },
+      "verify": ["BUN_INSTALL 用户环境变量指向新位置", "抽查 E 盘侧 install\\cache 下的 junction 已改写为自洽目标"],
+      "risk": "low",
+      "notes": "BUN_INSTALL 是 Bun 官方的 home 目录变量（bin/cache/安装的包都在其下）；bun.exe 本体在 bin 子目录，PATH 必须同步替换。"
+    },
+    {
+      "id": "vscode-extensions",
+      "name": "VS Code 扩展目录（~\\.vscode）",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%USERPROFILE%\\.vscode"],
+        "processes": ["Code"]
+      },
+      "config": {
+        "steps": [
+          { "type": "env", "name": "VSCODE_EXTENSIONS", "value": "{reloc}\\vscode-extensions" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%USERPROFILE%\\.vscode": "{reloc}\\vscode-extensions"
+        }
+      },
+      "verify": ["重开 VS Code 后执行 code --list-extensions 确认扩展齐全"],
+      "risk": "low",
+      "notes": "VSCODE_EXTENSIONS 是官方支持的环境变量（vscode issue #266395、企业版文档）；迁移前 VS Code 全部进程必须退出；env 设置后下次启动 VS Code 生效。"
+    },
+    {
+      "id": "wpsdrive",
+      "name": "WPS 云盘本地同步目录（~\\WPSDrive）",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%USERPROFILE%\\WPSDrive"],
+        "processes": ["wps", "wpspdf", "et", "wpp", "kwps", "wpscloudsvr"]
+      },
+      "config": {
+        "steps": [
+          { "type": "manual", "note": "WPS 客户端内：设置 → 存储管理 → 云文档缓存位置，改到 {reloc}\\wpsdrive，WPS 自动迁移缓存/同步内容。官方明确不能直接移动文件夹本身（WPS 官方论坛 wps.cn/topic/100146）。" }
+        ]
+      },
+      "data": {
+        "mode": "manual",
+        "targets": {}
+      },
+      "verify": ["新位置出现 E:\\Reloc\\wpsdrive 且内容完整，WPS 同步正常；旧目录确认后删除"],
+      "risk": "low",
+      "notes": "走 WPS 原生迁移最可靠（同步客户端会正确重建索引），不用 junction 是为规避同步客户端兼容风险。AI 只引导 + 验证 + 记录 manifest，数据迁移由 WPS 自身完成。"
     }
   ]
 }
