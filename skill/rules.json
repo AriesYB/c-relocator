@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "comment": "c-relocator 规则库。detect.paths 支持 %ENV% 展开；data.targets 的 {reloc} 占位 reloc 根；config.steps.type: command|env|file_edit|path_update；mechanism: config|junction|deny。risk=medium 及以上 migrate 前必须用户确认。",
+  "rules": [
+    {
+      "id": "deny-windows",
+      "name": "Windows 系统目录（永不操作）",
+      "mechanism": "deny",
+      "detect": { "paths": ["%SystemRoot%"], "processes": [] },
+      "notes": "WinSxS、Installer、System32 等被系统机制依赖，junction 会导致更新/修复异常。"
+    },
+    {
+      "id": "deny-managed-apps",
+      "name": "微软托管应用数据（永不操作）",
+      "mechanism": "deny",
+      "detect": {
+        "paths": [
+          "C:\\Program Files\\WindowsApps",
+          "%ProgramData%\\Microsoft",
+          "%LOCALAPPDATA%\\Microsoft",
+          "%APPDATA%\\Microsoft",
+          "%LOCALAPPDATA%\\Packages",
+          "C:\\Program Files\\Microsoft Office",
+          "C:\\Program Files\\Common Files\\microsoft shared\\ClickToRun",
+          "%ProgramData%\\Package Cache"
+        ],
+        "processes": []
+      },
+      "notes": "Store 应用、Defender/搜索索引、Office ClickToRun、Installer 缓存；脚本内置同一份名单双重防线。"
+    },
+    {
+      "id": "npm",
+      "name": "npm 全局包（prefix）与下载缓存（cache）",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%APPDATA%\\npm", "%LOCALAPPDATA%\\npm-cache"],
+        "processes": ["node"]
+      },
+      "config": {
+        "steps": [
+          { "type": "command", "cmd": "npm config set prefix \"{reloc}\\npm\"", "undo": "npm config delete prefix" },
+          { "type": "command", "cmd": "npm config set cache \"{reloc}\\npm-cache\"", "undo": "npm config delete cache" },
+          { "type": "path_update", "note": "把用户 PATH 中指向 %APPDATA%\\npm 的条目替换为 {reloc}\\npm（先备份原 PATH）" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%APPDATA%\\npm": "{reloc}\\npm",
+          "%LOCALAPPDATA%\\npm-cache": "{reloc}\\npm-cache"
+        }
+      },
+      "verify": ["npm config get prefix", "npm config get cache"],
+      "risk": "low",
+      "notes": "Windows 下 npm 默认 prefix 是 %APPDATA%\\npm（全局命令所在）；改 prefix 后必须同步改用户 PATH，否则 npm i -g 装的 CLI 全部失效。"
+    },
+    {
+      "id": "pip-cache",
+      "name": "pip 下载缓存",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%LOCALAPPDATA%\\pip\\cache"],
+        "processes": []
+      },
+      "config": {
+        "steps": [
+          { "type": "command", "cmd": "pip config set global.cache-dir \"{reloc}\\pip-cache\"", "undo": "pip config unset global.cache-dir" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%LOCALAPPDATA%\\pip\\cache": "{reloc}\\pip-cache"
+        }
+      },
+      "verify": ["pip cache dir"],
+      "risk": "low",
+      "notes": "verify 用 pip cache dir 检查实际生效路径，应输出 {reloc}\\pip-cache。"
+    },
+    {
+      "id": "jetbrains-system",
+      "name": "JetBrains IDE 缓存与索引（%LOCALAPPDATA%\\JetBrains 整目录）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%LOCALAPPDATA%\\JetBrains"],
+        "processes": ["idea*", "pycharm*", "webstorm*", "clion*", "goland*", "rider*", "datagrip*", "phpstorm*", "rubymine*", "studio64*", "jcef*"]
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "%LOCALAPPDATA%\\JetBrains": "{reloc}\\jetbrains-system"
+        }
+      },
+      "verify": [],
+      "risk": "low",
+      "notes": "索引/缓存在 Local，配置在 Roaming（体积小、不动）；junction 后首次打开 IDE 确认配置与插件完好。jcef* 是 IDE 内嵌浏览器进程。"
+    },
+    {
+      "id": "gradle",
+      "name": "Gradle 用户目录（依赖缓存 + wrapper 发行版）",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%USERPROFILE%\\.gradle"],
+        "processes": ["java"]
+      },
+      "config": {
+        "steps": [
+          { "type": "env", "name": "GRADLE_USER_HOME", "value": "{reloc}\\gradle-home" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%USERPROFILE%\\.gradle": "{reloc}\\gradle-home"
+        }
+      },
+      "verify": ["新开终端执行: set GRADLE_USER_HOME"],
+      "risk": "medium",
+      "notes": "java 进程可能是 Gradle daemon，先 gradle --stop 再迁移；也可能是无关 JVM 程序，误报时向用户确认。"
+    },
+    {
+      "id": "cargo-rustup",
+      "name": "Rust 工具链与包缓存（cargo + rustup）",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%USERPROFILE%\\.cargo", "%USERPROFILE%\\.rustup"],
+        "processes": ["rustc", "cargo", "rust-analyzer"]
+      },
+      "config": {
+        "steps": [
+          { "type": "env", "name": "CARGO_HOME", "value": "{reloc}\\cargo-home" },
+          { "type": "env", "name": "RUSTUP_HOME", "value": "{reloc}\\rustup-home" },
+          { "type": "path_update", "note": "用户 PATH 中 %USERPROFILE%\\.cargo\\bin 替换为 {reloc}\\cargo-home\\bin（先备份原 PATH）" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%USERPROFILE%\\.cargo": "{reloc}\\cargo-home",
+          "%USERPROFILE%\\.rustup": "{reloc}\\rustup-home"
+        }
+      },
+      "verify": ["cargo --version", "rustup show"],
+      "risk": "medium",
+      "notes": "PATH 必须同步更新，否则 rustup/cargo 失效；VS Code 的 rust-analyzer 重启后生效。"
+    },
+    {
+      "id": "go",
+      "name": "Go 工作区与模块缓存（GOPATH）",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%USERPROFILE%\\go"],
+        "processes": ["go", "gopls"]
+      },
+      "config": {
+        "steps": [
+          { "type": "env", "name": "GOPATH", "value": "{reloc}\\go-home" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%USERPROFILE%\\go": "{reloc}\\go-home"
+        }
+      },
+      "verify": ["go env GOPATH"],
+      "risk": "low",
+      "notes": "GOPATH 默认 %USERPROFILE%\\go；未设 GOBIN 时可执行文件在 GOPATH\\bin，注意 PATH 是否引用旧路径。"
+    },
+    {
+      "id": "huggingface",
+      "name": "HuggingFace / PyTorch 模型缓存",
+      "mechanism": "config",
+      "detect": {
+        "paths": ["%USERPROFILE%\\.cache\\huggingface", "%USERPROFILE%\\.cache\\torch"],
+        "processes": ["python"]
+      },
+      "config": {
+        "steps": [
+          { "type": "env", "name": "HF_HOME", "value": "{reloc}\\hf-home" },
+          { "type": "env", "name": "TORCH_HOME", "value": "{reloc}\\torch-home" }
+        ]
+      },
+      "data": {
+        "mode": "copy",
+        "targets": {
+          "%USERPROFILE%\\.cache\\huggingface\\hub": "{reloc}\\hf-home\\hub",
+          "%USERPROFILE%\\.cache\\huggingface\\datasets": "{reloc}\\hf-home\\datasets",
+          "%USERPROFILE%\\.cache\\torch": "{reloc}\\torch-home"
+        }
+      },
+      "verify": [],
+      "risk": "low",
+      "notes": "HF_HOME 指向根目录，hub/datasets 缓存在其子目录下，因此按子目录映射；python 进程在跑时先确认是否训练任务。"
+    }
+  ]
+}

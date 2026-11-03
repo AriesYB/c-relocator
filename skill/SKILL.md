@@ -1,0 +1,176 @@
+---
+name: c-relocator
+description: C 盘重定向与数据迁移（C 盘瘦身治本方案）：把 npm、pip、Gradle、cargo、Go、JetBrains 索引、HuggingFace 等从 C 盘迁到其他盘。能配置的工具改官方配置并迁移已有数据；不能配置的路径用目录联接 junction 兜底；manifest 全程台账，支持撤销（undo）、重装后重建（rebuild）、装前预占位（preplace）。当用户提到 C 盘满了 / C 盘空间不足 / C 盘瘦身、把某工具的缓存/索引/包迁到其他盘、修改 npm/pip/gradle/cargo/JetBrains/CUDA 存储位置、软件安装不让选盘符、junction/mklink 时使用。
+---
+
+# c-relocator — C 盘重定向与数据迁移
+
+对"程序总往 C 盘写"做治本处理：清理软件只能删，这里做的是**挪 + 改写入位置**。
+
+三种机制（优先级从高到低，`rules.json` 决定每条用什么）：
+
+1. `config` — 用工具官方配置重定向（CLI 配置 / 环境变量 / 配置文件），最干净。
+2. `junction` — 目录联接兜底：数据实移到目标盘，C 盘原位置放链接，程序无感知。
+3. `deny` — 拒绝清单，永不操作。
+
+## 铁律（任何情况下不得违反）
+
+1. deny 名单内的路径永不执行任何写操作；用户明确要求也要先警告并拒绝。
+2. 删除备份是唯一不可逆动作：必须用户显式同意后，经 `Undo-Reloc.ps1 -Action confirm` 执行（脚本内部会先重跑验证）。禁止直接手删 `.reloc-bak` 或旧源目录。
+3. 一切数据移动与链接创建必须经 `Move-Reloc.ps1`；junction 删除一律 `cmd /c rmdir`（只删链接不动目标），禁止对链接路径用 `Remove-Item -Recurse`。
+4. 迁移前相关进程检查必须通过（脚本 `-BlockProcesses` 强制）；不通过就提示用户关闭后重试，不要绕过。
+5. 任何一步失败即停止，向用户汇报：已完成的步骤、当前状态、建议动作。不得自行跳步补救。
+
+## 关键路径
+
+- 规则库：`rules.json`（与本文件同目录）
+- 脚本：`scripts/Scan-Reloc.ps1`、`scripts/Move-Reloc.ps1`、`scripts/Undo-Reloc.ps1`（运行方式：`powershell -NoProfile -ExecutionPolicy Bypass -File <脚本> <参数>`）
+- manifest：`<reloc根>\manifest.json` — 唯一状态源，所有迁移的台账
+- 配置文件备份：`<reloc根>\undo\<id>\`
+
+## 进程处理规范
+
+迁移被 `-BlockProcesses` 拒绝时：
+
+1. 把正在运行的进程名清单报给用户，首选请用户自行保存工作并关闭。
+2. 用户要求代关时，先优雅关闭（等同点窗口 X，有未保存内容会弹窗）：
+
+   ```powershell
+   Get-Process -Name 'idea*','jcef*' -ErrorAction SilentlyContinue |
+     ForEach-Object { [void]$_.CloseMainWindow() }
+   ```
+
+   等待 10~20 秒后复查；仍未退出且用户明确同意强杀，才允许 `Stop-Process -Force`。
+3. 复查进程清单为空后再迁移。AI 不得未经用户同意强杀进程。
+
+## 首次运行：确定 reloc 根
+
+manifest 不存在时先初始化：
+
+1. 列出候选盘（非 C 的本地固定 NTFS 盘，按剩余空间降序），取剩余空间最大者推荐 `<盘>:\Reloc`：
+
+   ```powershell
+   [IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq 'Fixed' -and $_.DriveFormat -eq 'NTFS' -and $_.Name -notlike 'C:*' } |
+     Sort-Object AvailableFreeSpace -Descending |
+     ForEach-Object { '{0}  {1:N0} GB free' -f $_.Name, ($_.AvailableFreeSpace / 1GB) }
+   ```
+
+2. 向用户展示推荐值，请用户确认或给出其他路径（用 AskUserQuestion）。**不得未经确认自行选定。**
+3. 创建初始状态：
+
+   ```powershell
+   $root = 'D:\Reloc'   # 用户确认后的值
+   New-Item -ItemType Directory -Path "$root\undo" -Force | Out-Null
+   @{ version = 1; relocRoot = $root; entries = @() } | ConvertTo-Json |
+     Set-Content -LiteralPath "$root\manifest.json" -Encoding UTF8
+   ```
+
+## 子命令工作流
+
+### status
+读 manifest，汇报每条迁移的状态（active / backup-pending / copy-done / undone / failed）。
+
+### audit（只读，无写操作）
+1. `Scan-Reloc.ps1 -Rules <rules.json> -Manifest <manifest>` — 规则库条目体检（体积 / 状态 / 机制建议）。
+2. 找规则库没覆盖的漏网之鱼：加 `-TopDirs -Top 25`（对 `%LOCALAPPDATA%`、`%APPDATA%`、`%USERPROFILE%` 做子目录体积排行；大目录较慢，可加 `-SkipSizes` 先看清单）。
+3. 输出建议表：条目 / 机制 / 体积 / 风险 / 建议。新发现的可迁条目先补进 `rules.json` 再 migrate。
+
+### migrate `<id>`
+1. 从 `rules.json` 取条目，向用户复述将要执行的动作（机制、源、目标、体积）；risk=medium 及以上必须先获用户确认。
+2. 数据迁移：对 `data.targets` 每个映射调用一次（`%ENV%` 与 `{reloc}` 占位符先展开成实际路径）：
+
+   ```
+   Move-Reloc.ps1 -Id <id> -Source <源> -Target <目标> -Manifest <manifest> `
+     -Mode <rules 的 data.mode> -BlockProcesses <detect.processes 逗号分隔>
+   ```
+
+3. config 型：按 `config.steps` 顺序执行，遵守下方「config 步骤执行规范」。
+4. 验证：运行 `verify` 中的命令确认生效。
+5. 汇报结果，并提醒：确认软件正常后，再让用户同意删除备份（铁律 2）。
+
+### undo `<id>`
+1. `Undo-Reloc.ps1 -Action undo -Id <id> -Manifest <manifest>`（还原数据/链接，并按条目 `configUndo` 记录还原环境变量、PATH、配置文件）。
+2. config 型再执行规则里对应步骤的 `undo` 命令（如 `npm config delete prefix`）。
+
+### rebuild
+重装系统后数据还在、链接丢失时：`Undo-Reloc.ps1 -Action rebuild -Manifest <manifest>` 批量重建 junction。
+
+### confirm（删除备份，须用户显式同意）
+`Undo-Reloc.ps1 -Action confirm -Id <id> -Manifest <manifest>` — 脚本先重验证再删，manifest 状态置 active。
+
+### preplace `<C盘预期路径>`（预占位）
+安装新软件**之前**把预期写入路径做成 junction，专治不让选盘符的安装器：
+
+1. 与用户确认目标 `<reloc根>\<名称>`；C 盘预期路径的父目录需已存在；该路径必须尚不存在且不在 deny 名单。
+2. 最小操作：
+
+   ```powershell
+   New-Item -ItemType Directory -Path 'D:\Reloc\<名称>' -Force | Out-Null
+   cmd /c mklink /J '<C盘预期路径>' 'D:\Reloc\<名称>'
+   ```
+
+3. 作为一条 junction 记录写进 manifest（status=active、bytes=0、backup=$null、notes 标注 preplace）。
+
+## config 步骤执行规范
+
+每一步都必须：先备份 → 修改 → 把撤销信息记入 manifest 条目的 `configUndo` 数组。
+
+- `type=command`：直接执行；撤销用规则里该步骤的 `undo` 命令（脚本不负责，由你执行）。
+- `type=env`：
+
+  ```powershell
+  $name = 'GRADLE_USER_HOME'; $value = '<展开后的值>'
+  $old = [Environment]::GetEnvironmentVariable($name, 'User')   # $null = 原本不存在
+  [Environment]::SetEnvironmentVariable($name, $value, 'User')
+  # 记入 configUndo：@{type='env'; name=$name; previousValue=$old}
+  ```
+
+- `type=path_update`（改用户 PATH，务必先备份整条 PATH）：
+
+  ```powershell
+  $old = [Environment]::GetEnvironmentVariable('Path', 'User')
+  Set-Content -LiteralPath '<reloc根>\undo\<id>\user-path-<时间戳>.txt' -Value $old -Encoding UTF8
+  $new = ($old -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne '<旧条目>' }) -join ';'
+  if ($new -notlike '*<新条目>*') { $new = '<新条目>;' + $new }
+  [Environment]::SetEnvironmentVariable('Path', $new, 'User')
+  # 记入 configUndo：@{type='path'; previousValue=$old}
+  ```
+
+- `type=file_edit`（如 JetBrains 的 idea.properties）：
+
+  ```powershell
+  Copy-Item '<配置文件>' '<reloc根>\undo\<id>\<文件名>.bak' -Force
+  # 修改后记入 configUndo：@{type='file'; original='<原路径>'; backup='<备份路径>'}
+  ```
+
+manifest 安全更新写法（不要手拼 JSON 字符串）：
+
+```powershell
+$m = Get-Content -Raw -Encoding UTF8 '<manifest>' | ConvertFrom-Json
+$e = @($m.entries) | Where-Object { $_.id -eq '<id>' -and $_.source -eq '<source>' } | Select-Object -First 1
+$e | Add-Member -NotePropertyName configUndo -NotePropertyValue @(
+  [pscustomobject]@{ type = 'env'; name = 'GRADLE_USER_HOME'; previousValue = $null }
+) -Force
+$m.updatedAt = (Get-Date).ToString('o')
+$m | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath '<manifest>' -Encoding UTF8
+```
+
+## 脚本参数速查
+
+```
+Move-Reloc.ps1 -Id <id> -Source <C盘源目录> -Target <目标盘目录> -Manifest <manifest>
+               [-Mode junction|copy] [-BlockProcesses node,java,...]
+Scan-Reloc.ps1 -Rules <rules.json> [-Manifest <manifest>] [-Ids npm,pip]
+               [-TopDirs] [-TopRoots <目录,...>] [-Top 20] [-SkipSizes]
+Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>]
+```
+
+退出码：Move — 0 成功 / 10 预检失败 / 11 复制失败（已自动清理半成品，源未动）/ 12 后置步骤失败（已回滚）。Undo — 0 成功 / 20 失败（看输出）。
+
+## 边界与已知风险
+
+- junction 依赖 NTFS 本地固定盘；复制期间 C/D 两盘同时占空间；目标盘空间需 ≥ 源 × 1.1。
+- 源目录树内有嵌套链接时脚本会拒绝迁移（robocopy `/XJ` 会跳过它们导致缺文件）。
+- 卸载软件前先查 manifest 是否涉及链接目录，必要时先 undo 再卸载（个别卸载器会穿透链接清掉目标盘数据）。
+- WSL / Docker 用官方迁移（`wsl --export/--import`；Docker 设置里改 disk image location），规则库有标注，不要用 junction 硬搬虚拟磁盘所在目录。
+- 浏览器等 medium risk 条目：默认只在 audit 提示，不主动 migrate。
