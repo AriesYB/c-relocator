@@ -1,45 +1,99 @@
 # c-relocator
 
+> Stop "C: drive full" at the root: redirect dev-tool storage with official configs or NTFS junctions — fully logged, undoable, rebuildable.
+>
 > 把"C 盘怎么又满了"变成一次性配置问题：对开发工具链做**配置重定向 + 数据迁移**，不做垃圾清理。
 
-npm、pip、Gradle、cargo、Go、JetBrains 索引、HuggingFace、CUDA……这些工具默认往 C 盘写，
-清理软件只能删垃圾，治不了本因。c-relocator 是一个 ZCode skill：
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
+![Agent](https://img.shields.io/badge/agent-Skills%20spec-green)
 
-- **能配置的工具**：改官方配置（环境变量 / CLI 配置 / 配置文件）并把已有数据迁走，迁完验证生效。
-- **不能配置的路径**：建目录联接（junction），数据实移到其他盘，C 盘原位置放链接，程序无感知。
-- **全程台账**：manifest 记录每次迁移，支持撤销（undo）、重装系统后一键重建链接（rebuild）、
-  装新软件前预占位（preplace，专治不让选安装路径的安装器）。
-- **安全模型**：拒绝名单写死（脚本 + 规则库双重防线）；危险操作只经一个入口脚本
-  （先复制后改名、失败零损失回滚、哨兵验证）；删除备份是唯一不可逆动作，
-  必须显式确认且脚本先重验证。
+npm, pip, Gradle, cargo, Go, JetBrains indexes, HuggingFace, CUDA, WPS cloud, WeChat… they all
+write to `C:` by default. Cleaner apps only delete the mess; **c-relocator moves the writer**:
 
-## 安装（ZCode skill）
+- **Config-first**: for tools with official redirect options (env vars / CLI config / config files),
+  the agent sets them and migrates existing data.
+- **Junction fallback**: for paths with no official option (CUDA toolkit, IDE data dirs), it moves the
+  data to another drive and drops an NTFS junction at the original location — apps never notice.
+- **Manifest ledger**: every migration is recorded in `manifest.json` — undo any single entry,
+  rebuild all junctions after a Windows reinstall, or pre-place junctions *before* installing
+  software that refuses to ask for a path.
+- **Safety model**: a hard deny-list (script + rules double line), one audited entry point for all
+  moves (copy-then-rename, auto-rollback, sentinel verification), and deletion of backups is the only
+  irreversible step — explicit user consent + forced re-verification.
+- **Disk mapping**: `Map-Reloc` renders a SpaceSniffer-style interactive HTML treemap of any volume.
 
-把 `skill/` 目录复制到个人技能目录：
+## Install
+
+Works with any agent that supports the [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) format (Claude Code, Codex, ZCode, OpenCode, Cursor…).
+
+**Universal (skills CLI):**
+
+```bash
+npx skills add AriesYB/c-relocator
+```
+
+**Claude Code (plugin marketplace):**
 
 ```
-skill/ -> ~\.agents\skills\c-relocator\
+/plugin marketplace add AriesYB/c-relocator
+/plugin install c-relocator@ariesyb
 ```
 
-包含：`SKILL.md`（工作流与铁律）、`rules.json`（规则库，纯数据可自行扩充）、
-`scripts/`（Scan 只读扫描 / Move 唯一迁移入口 / Undo 撤销重建确认）。
+**Manual:** copy the `skill/` folder to your agent's skills directory
+(e.g. `~/.agents/skills/c-relocator`, `~/.claude/skills/c-relocator`, `~/.codex/skills/c-relocator`).
 
-## 使用示例
+> Windows only. Junction creation needs no admin rights; operating under `Program Files` does.
 
-对 AI 说：
+## What the agent can do
 
-- "C 盘又满了，audit 一下看看有什么能迁的"
-- "把 JetBrains 索引迁到 D 盘"
-- "我要装 CUDA，先帮我预占位"
-- "上次迁的 npm 不对，撤销"
+| Command | Behavior |
+|---|---|
+| `audit` / `discover` | read-only scans: rules-based health check + TopDirs long-tail discovery + HTML treemap |
+| `migrate <id>` | full migration: precheck → copy → config steps → verify (both config生效 and data-usable layers) |
+| `undo <id>` | restore data/links + env vars / PATH / config files |
+| `rebuild` | recreate all junctions after a Windows reinstall (data lives on the target drive) |
+| `preplace <path>` | pre-place a junction before installing software that won't let you pick a drive |
+| `confirm <id>` | re-verify, then delete the backup (the only irreversible step) |
 
-## 状态
+The rule library (`rules.json`) ships with ~20 entries: npm, pip, conda, Gradle, Maven, cargo/rustup,
+Go, HuggingFace, JetBrains (both AppData sides), VS Code, bun, WPS cloud drive, QQ/WeChat/WeCom data,
+Electron updater caches, `~/.cache`, CUDA toolkit — plus deny entries. It's plain data; extend it freely.
 
-M1（骨架 + npm / pip / JetBrains 实战）进行中，规则库持续扩充，详见 [DESIGN.md](DESIGN.md)。
+## Real-world validation
 
-## 安全声明
+Developed and verified on a machine that went from **1 GB free** on `C:` to double-digit GB in one
+session: JetBrains (11.9 GB), WPS cloud (18.2 GB), Tencent data (11.5 GB, incl. hunting down an
+invisible directory-handle locker), pip/gradle/npm/maven/bun/VS Code, 27 Electron updater caches in
+one batch — every mechanism in this skill ran against production data first. Battle scars are
+recorded in [DESIGN.md](DESIGN.md) §7.4.
 
-- 永不操作：`C:\Windows`（含 WinSxS、Installer）、`WindowsApps`、`ProgramData\Microsoft`、
-  `%LOCALAPPDATA%\Microsoft`、`%APPDATA%\Microsoft`、Office ClickToRun 等系统/托管目录。
-- 迁移有风险：执行前让 AI 复述将要做的动作；备份删除前脚本会强制重新验证。
-- WSL / Docker 虚拟磁盘走各自官方迁移方式，不用 junction 硬搬。
+## Safety notes
+
+- Never touches: `C:\Windows` (WinSxS, Installer), `WindowsApps`, `ProgramData\Microsoft`,
+  `%LOCALAPPDATA%\Microsoft`, Office ClickToRun, antivirus dirs.
+- Junctions depend on NTFS fixed local disks; exFAT/network targets are rejected.
+- Uninstalling software that sits behind a junction: undo the junction first (uninstallers may
+  follow links). The manifest tells you which entries are linked.
+- WSL / Docker virtual disks use their own official migration paths — the skill refuses to
+  junction those.
+- DELETING a backup is irreversible. The agent must ask you first, and the script re-verifies
+  before deleting.
+
+## Repository layout
+
+```
+skill/
+├── SKILL.md        # workflow + iron rules (the skill itself)
+├── rules.json      # rule library — pure data, extend freely
+└── scripts/
+    ├── Scan-Reloc.ps1   # read-only audit scanner (rules + TopDirs)
+    ├── Map-Reloc.ps1    # SpaceSniffer-style HTML treemap
+    ├── Move-Reloc.ps1   # THE migration entrypoint (junction/copy, -KeepLinks, -ResumeFromCopy)
+    └── Undo-Reloc.ps1   # undo / rebuild / confirm-delete (-AllowLinkTree)
+DESIGN.md           # design doc: architecture, safety model, field lessons (zh)
+```
+
+## License
+
+[MIT](LICENSE)

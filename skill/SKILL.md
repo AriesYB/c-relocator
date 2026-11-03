@@ -1,6 +1,10 @@
 ---
 name: c-relocator
 description: C 盘重定向与数据迁移（C 盘瘦身治本方案）：把 npm、pip、Gradle、cargo、Go、JetBrains 索引、HuggingFace 等从 C 盘迁到其他盘。能配置的工具改官方配置并迁移已有数据；不能配置的路径用目录联接 junction 兜底；manifest 全程台账，支持撤销（undo）、重装后重建（rebuild）、装前预占位（preplace）。当用户提到 C 盘满了 / C 盘空间不足 / C 盘瘦身、把某工具的缓存/索引/包迁到其他盘、修改 npm/pip/gradle/cargo/JetBrains/CUDA 存储位置、软件安装不让选盘符、junction/mklink 时使用。
+license: MIT
+metadata:
+  version: 0.2.0
+  platform: Windows 10/11 (PowerShell 5.1+)
 ---
 
 # c-relocator — C 盘重定向与数据迁移
