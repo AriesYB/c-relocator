@@ -78,19 +78,27 @@ manifest 不存在时先初始化：
 1. `Scan-Reloc.ps1 -Rules <rules.json> -Manifest <manifest> -TopDirs -Top 30` — 对 `%LOCALAPPDATA%`、
    `%APPDATA%`、`%USERPROFILE%` 做子目录体积排行（含文件数 / .exe 数 / 最近写入；deny 目录与
    链接自动剪枝）。大目录较慢时可先 `-SkipSizes` 看清单再挑着量。按体积从大到小逐个处理。
+   全盘视角（SpaceSniffer 式）用 `Map-Reloc.ps1 -Root C:\ -Depth 4 -MinMB 50 -Rules <rules.json>`，
+   生成自包含交互式 HTML treemap（点击下钻、面包屑回退），适合定位规则库视角之外的大块头
+   （如 `Program Files`、`ProgramData` 下的工具链）。`-NoPruneDeny` 可连系统目录一起看（纯分析）。
 2. 对每个大目录做**归属识别**（手段从强到弱）：
    - 名字即线索：`%LOCALAPPDATA%\<App>`、`%LOCALAPPDATA%\Programs\<App>` 多为厂商/产品名；
    - 目录内找标记：`.exe` 的产品属性、settings/config 文件、package 标识、日志内容；
    - 反查注册表卸载表：`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` 与
      `HKCU\...\Uninstall` 的 `InstallLocation` / `DisplayIcon` 是否指向该路径；
    - 仍不确定就联网检索：`<目录名> AppData folder which software`、`<App> move cache/data to another drive`。
-3. **分类判断**：文件数巨大、无 .exe、近期有写入 → 数据/缓存（首选 config，无配置则 junction）；
+3. **可迁移性分析（高级，可选）**：归属已知但"支持 config 还是只能 junction / 有没有隐藏的
+   安装路径选项"不确定、且目录价值高（GB 级）时，可用 reverse-engineer-anything (REA) 对安装器
+   或主程序做静态逆向：提取硬编码路径常量、读取的环境变量名、写注册表的键值——直接回答
+   "这个软件认哪些重定向开关"（CUDA 安装器的路径常量、Electron 应用是否读 XXX_HOME 皆可如此确认）。
+   REA 成本高，只对高价值未知项使用；结论写进 rules.json 的 notes 注明来源。
+4. **分类判断**：文件数巨大、无 .exe、近期有写入 → 数据/缓存（首选 config，无配置则 junction）；
    含 .exe/运行时 → 程序本体（junction 可行，但卸载器穿透风险升一级，risk=medium）；
    属于系统/托管的 → deny。识别不确定的一律 risk=medium（migrate 前必问用户）。
-4. 向用户输出**提案表**（目录 / 归属结论 / 体积 / 建议机制 / 风险 / 依据来源），用户逐条确认后：
+5. 向用户输出**提案表**（目录 / 归属结论 / 体积 / 建议机制 / 风险 / 依据来源），用户逐条确认后：
    确认迁的先写入 `rules.json`（机制、config 步骤、data 映射、verify、risk、notes 带上依据），
    再走标准 migrate 流程。用户没确认的只记录在案，绝不擅自迁移。
-5. `audit` 与 `discover` 均只读；唯一写操作是用户确认后更新 `rules.json`。
+6. `audit` 与 `discover` 均只读；唯一写操作是用户确认后更新 `rules.json`。
 
 ### migrate `<id>`
 1. 从 `rules.json` 取条目，向用户复述将要执行的动作（机制、源、目标、体积）；risk=medium 及以上必须先获用户确认。
@@ -198,6 +206,7 @@ Move-Reloc.ps1 -Id <id> -Source <C盘源目录> -Target <目标盘目录> -Manif
                [-Mode junction|copy] [-BlockProcesses node,java,...] [-KeepLinks]
 Scan-Reloc.ps1 -Rules <rules.json> [-Manifest <manifest>] [-Ids npm,pip]
                [-TopDirs] [-TopRoots <目录,...>] [-Top 20] [-SkipSizes]
+Map-Reloc.ps1  -Root <目录> [-Depth 4] [-MinMB 50] [-Out <html>] [-Rules <rules.json>] [-NoPruneDeny]
 Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>] [-AllowLinkTree]
 ```
 
