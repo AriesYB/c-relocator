@@ -350,6 +350,77 @@
       "verify": [],
       "risk": "low",
       "notes": "与 qq-appdata 同批迁移（同一批进程退出即可）。"
+    },
+    {
+      "id": "jetbrains-roaming",
+      "name": "JetBrains 插件与配置（Roaming\\JetBrains，与 Local 侧配对）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%APPDATA%\\JetBrains"],
+        "processes": ["idea*", "pycharm*", "webstorm*", "clion*", "goland*", "rider*", "datagrip*", "phpstorm*", "rubymine*", "studio64*", "jcef*"]
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "%APPDATA%\\JetBrains": "{reloc}\\jetbrains-roaming"
+        }
+      },
+      "verify": [],
+      "risk": "low",
+      "notes": "插件本体在 Roaming 侧（体积可观），与已迁的 Local 侧（索引缓存）配对；IDE 全部退出后迁。"
+    },
+    {
+      "id": "google-chrome-local",
+      "name": "Chrome 用户数据（Local\\Google 整目录）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%LOCALAPPDATA%\\Google"],
+        "processes": ["chrome*"]
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "%LOCALAPPDATA%\\Google": "{reloc}\\chrome-data"
+        }
+      },
+      "verify": ["重开 Chrome 确认登录态/书签/扩展完好"],
+      "risk": "medium",
+      "notes": "Chrome 必须完全退出（含托盘后台模式，任务管理器确认 chrome.exe 清零）；更新器偶尔对链接目录敏感，异常时 undo 回滚即可，数据在目标盘无损。"
+    },
+    {
+      "id": "user-cache-root",
+      "name": "通用缓存根（~\\.cache：codex-runtimes/opencode/puppeteer 等）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%USERPROFILE%\\.cache"],
+        "processes": []
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "%USERPROFILE%\\.cache": "{reloc}\\user-cache"
+        }
+      },
+      "verify": [],
+      "risk": "low",
+      "notes": "XDG 缓存约定目录，工具按普通存储对待（重建也无妨）；puppeteer 另有 PUPPETEER_CACHE_DIR 可走 config，树内若现嵌套链接用 -KeepLinks。"
+    },
+    {
+      "id": "electron-updaters",
+      "name": "Electron 应用更新器下载缓存群（Local\\*-updater，约30个目录）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["%LOCALAPPDATA%\\*-updater"],
+        "processes": []
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {},
+        "targetPrefix": "{reloc}\\updaters\\"
+      },
+      "verify": [],
+      "risk": "low",
+      "notes": "纯下载缓存，各应用下次检查更新即重建；同名 id 多条 manifest 记录（每目录一条），targetPrefix + 目录名生成目标路径。单个目录锁失败不影响其余（循环逐条 try）。"
     }
   ]
 }
