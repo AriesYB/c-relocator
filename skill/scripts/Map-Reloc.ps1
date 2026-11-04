@@ -295,6 +295,7 @@ if ($Serve) {
         transition:left .35s cubic-bezier(.2,.7,.3,1),top .35s cubic-bezier(.2,.7,.3,1),
                    width .35s cubic-bezier(.2,.7,.3,1),height .35s cubic-bezier(.2,.7,.3,1),opacity .4s}
   .cell.new{opacity:0}
+  .cell.expd{border:1px solid #ffd479}
   .cell .lbl{position:absolute;left:4px;top:2px;right:4px;pointer-events:none;
              text-shadow:0 1px 3px #000;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
   .cell.big .lbl{font-size:15px;font-weight:600}
@@ -322,11 +323,11 @@ if ($Serve) {
 <div id="tip"></div>
 <div id="ctx"><div id="ctxi"></div><div id="ctxp"></div></div>
 <div id="wait"><div><div class="spin"></div><div style="margin-top:12px">counting directories... blocks appear as each finishes</div></div></div>
-<div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span> · 右键方块 = 在资源管理器中打开</div>
+<div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span> · 单击展开/收起 · 双击进入 · Backspace/⬅ 返回 · Esc 收起 · 右键打开文件夹</div>
 <script>
 var ROOT = '__ROOT__';
 var curPath = ROOT, stack = [], cache = {}, divs = {}, busy = false;
-var menuPath = '', menuSel = false;
+var menuPath = '', menuSel = false, expanded = {};
 var map = document.getElementById('map');
 
 function fmt(b){ if(b>=1073741824) return (b/1073741824).toFixed(2)+' GB';
@@ -362,47 +363,52 @@ function squarify(items,x,y,w,h,out){
   }
   if(row.length&&w>1&&h>1) layoutRow(row,x,y,w,h,out);
 }
-function render(){
-  var node = cache[curPath]; if(!node) return;
-  var W = map.clientWidth, H = map.clientHeight;
-  var items = (node.c||[]).slice().sort(function(a,b){return b.s-a.s;});
-  var wait = document.getElementById('wait');
+function layoutInto(node,x0,y0,w0,h0,keyBase,seen){
+  var items=(node.c||[]).slice().sort(function(a,b){return b.s-a.s;});
   var tot=0; for(var q=0;q<items.length;q++) tot+=items[q].s;
-  wait.style.display = (items.length&&tot>0)? 'none':'flex';
-  var out = [];
-  if(items.length&&tot>0&&W>1&&H>1){
-    var k=(W*H)/tot;
-    var px=items.map(function(it){ return {n:it.n,s:it.s*k,raw:it.s,p:it.p,f:it.f,done:it.done,c:it.c}; });
-    squarify(px,0,0,W,H,out);
-  }
-  var seen = {}, depth = stack.length;
+  if(!items.length||tot<=0||w0<10||h0<10) return;
+  var k=(w0*h0)/tot;
+  var px=items.map(function(it){ return {n:it.n,s:it.s*k,raw:it.s,p:it.p,f:it.f,done:it.done,c:it.c}; });
+  var out=[]; squarify(px,x0,y0,w0,h0,out);
+  var depth=stack.length;
+  var sep=(keyBase.charAt(keyBase.length-1)==='\\')?'':'\\';
   for(var i=0;i<out.length;i++){
-    var o=out[i], k=curPath.toLowerCase()+'|'+o.n.n, d=divs[k];
+    var o=out[i], kk=keyBase+'|'+o.n.n, d=divs[kk];
     if(!d){
       d=document.createElement('div'); d.className='cell new';
-      d.dataset.k=k; map.appendChild(d); divs[k]=d;
+      d.dataset.k=kk; map.appendChild(d); divs[kk]=d;
       setTimeout(function(el){ return function(){ el.className='cell'; }; }(d), 40);
       var l=document.createElement('div'); l.className='lbl'; d.appendChild(l);
       var b=document.createElement('div'); b.className='badge'; d.appendChild(b);
-      d.style.cursor=o.n.f?'default':'pointer';
+      d.style.cursor='pointer';
       d.addEventListener('mousemove',function(ev){
-        var n=ev.currentTarget.__n||{};
+        var el=ev.currentTarget, n=el.__n||{};
         var t=document.getElementById('tip'); t.style.display='block';
         t.style.left=Math.min(ev.clientX+14,window.innerWidth-560)+'px';
         t.style.top=(ev.clientY+14)+'px';
-        var fp=n.p||(curPath.charAt(curPath.length-1)==='\\'?curPath+n.n:curPath+'\\'+n.n);
+        var fp=el.__path||n.p||'';
         t.innerHTML='<div style="color:#9fd1ff;word-break:break-all">'+esc(fp)+'</div><b>'+fmt(n.raw)+'</b>'+
-          (n.f?'<span style="color:#888"> · 文件</span>':'<span style="color:#888"> · 目录</span>')+
+          (n.f?'<span style="color:#888"> · 文件</span>':'<span style="color:#888"> · 目录 · 单击展开/收起 · 双击进入</span>')+
           (n.done?'':'<br><span style="color:#ffd479">counting...</span>')+
           '<br><span style="color:#888">右键：'+(n.f?'打开所在文件夹':'在资源管理器中打开')+'</span>';
       });
       d.addEventListener('mouseleave',function(){ document.getElementById('tip').style.display='none'; });
       d.addEventListener('click',function(ev){ ev.stopPropagation();
-        var n=ev.currentTarget.__n||{};
-        if(!n.f&&n.c&&n.c.length&&n.p){ navigate(n.p); } });
+        var el=ev.currentTarget, n=el.__n||{};
+        if(n.f) return;
+        var p=el.__path; if(!p) return;
+        if(expanded[p]){ delete expanded[p]; }
+        else { expanded[p]=1; if(!cache[p]||!(cache[p].c&&cache[p].c.length)) fetchPath(p); }
+        render();
+      });
+      d.addEventListener('dblclick',function(ev){ ev.stopPropagation();
+        var el=ev.currentTarget, n=el.__n||{};
+        if(n.f) return;
+        var p=el.__path;
+        if(p){ navigate(p); } });
       d.addEventListener('contextmenu',function(ev){ ev.preventDefault(); ev.stopPropagation();
-        var n=ev.currentTarget.__n||{};
-        var fp=n.p||(curPath.charAt(curPath.length-1)==='\\'?curPath+n.n:curPath+'\\'+n.n);
+        var el=ev.currentTarget, n=el.__n||{};
+        var fp=el.__path||n.p||'';
         var c=document.getElementById('ctx');
         document.getElementById('ctxi').textContent=n.f?'打开所在文件夹（并选中）':'在资源管理器中打开';
         document.getElementById('ctxp').textContent=fp;
@@ -412,16 +418,32 @@ function render(){
         c.style.top=Math.min(ev.clientY,window.innerHeight-90)+'px';
       });
     }
-    d.__n=o.n;
+    var pth=o.n.p||(keyBase+sep+o.n.n);
+    d.__n=o.n; d.__path=pth;
     d.style.left=o.x+'px'; d.style.top=o.y+'px';
     d.style.width=Math.max(0,o.w-2)+'px'; d.style.height=Math.max(0,o.h-2)+'px';
     d.style.background=colors(depth+i);
+    d.classList.toggle('expd',!!expanded[pth]);
     var lbl=d.querySelector('.lbl');
-    lbl.textContent=o.n.n+'  '+fmt(o.n.raw);
+    lbl.textContent=o.n.n+'  '+fmt(o.n.raw)+(expanded[pth]?' ▾':'');
     lbl.style.fontSize=(o.w>180&&o.h>50)?'14px':'11px';
     d.querySelector('.badge').textContent=o.n.done?'':'...';
-    seen[k]=1;
+    seen[kk]=1;
+    if(expanded[pth]&&o.n.c){
+      var sub=cache[pth]||o.n;
+      layoutInto(sub,o.x+2,o.y+15,Math.max(0,o.w-5),Math.max(0,o.h-17),pth,seen);
+    }
   }
+}
+function render(){
+  var node = cache[curPath]; if(!node) return;
+  var W = map.clientWidth, H = map.clientHeight;
+  var items=(node.c||[]);
+  var tot=0; for(var q=0;q<items.length;q++) tot+=items[q].s;
+  var wait = document.getElementById('wait');
+  wait.style.display = (items.length&&tot>0)? 'none':'flex';
+  var seen={};
+  layoutInto(node,0,0,W,H,curPath,seen);
   for(var key in divs){ if(!seen[key]){ var old=divs[key]; old.style.opacity='0';
     (function(el){ setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); },450); })(old);
     delete divs[key]; } }
@@ -429,6 +451,9 @@ function render(){
 }
 function drawBar(node){
   var b=document.getElementById('bar'); b.innerHTML='';
+  if(stack.length){ var bk=document.createElement('span'); bk.className='crumb'; bk.textContent='⬅ 返回';
+    bk.onclick=function(){ goUp(); }; b.appendChild(bk);
+    b.appendChild(document.createTextNode(' | ')); }
   function mk(label,p){ var s=document.createElement('span'); s.className='crumb'; s.textContent=label;
     s.onclick=(function(pp){ return function(){ navigate(pp,false); }; })(p); b.appendChild(s); }
   mk('[root]',ROOT);
@@ -439,7 +464,7 @@ function drawBar(node){
   var cb=document.createElement('b'); cb.textContent=node.n+' = '+fmt(node.s); b.appendChild(cb);
   document.getElementById('cur').textContent=curPath;
   document.getElementById('stat').innerHTML=node.done?
-    '<b>done</b> - click any block to drill in':'<b>counting...</b> blocks grow live';
+    'done · <b>单击展开</b> · <b>双击进入</b> · 右键打开':'<b>counting...</b> blocks grow live';
 }
 var fails=0, waitHtml=document.getElementById('wait').innerHTML;
 function netFail(){
@@ -455,6 +480,17 @@ function openPath(p,sel){ var x=new XMLHttpRequest();
 document.addEventListener('click',function(){ document.getElementById('ctx').style.display='none'; });
 document.getElementById('ctx').addEventListener('click',function(e2){ e2.stopPropagation();
   openPath(menuPath,menuSel); document.getElementById('ctx').style.display='none'; });
+function fetchPath(p){
+  var x=new XMLHttpRequest();
+  x.open('GET','/tree?path='+encodeURIComponent(p),true);
+  x.timeout=4000;
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      try{ var j=JSON.parse(x.responseText); cache[p]=j.node; if(expanded[p]) render(); }catch(e){}
+    }
+  };
+  x.send(null);
+}
 function fetchTree(){
   if(busy) return; busy=true;
   var x=new XMLHttpRequest();
@@ -464,19 +500,27 @@ function fetchTree(){
     if(x.readyState===4){ busy=false;
       if(x.status===200){ fails=0;
         var w=document.getElementById('wait'); if(w.innerHTML!==waitHtml){ w.innerHTML=waitHtml; }
-        try{ var j=JSON.parse(x.responseText); cache[curPath]=j.node; render(); }catch(e){} }
+        try{ var j=JSON.parse(x.responseText); cache[curPath]=j.node; render();
+          for(var p2 in expanded){ if(!cache[p2]||!cache[p2].done) fetchPath(p2); } }catch(e){} }
       else { netFail(); } }
   };
   x.onerror=netFail; x.ontimeout=netFail;
   x.send(null);
 }
+function goUp(){
+  if(!stack.length) return;
+  var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; expanded={}; fetchTree();
+}
 function navigate(path,isChild){
   if(isChild!==false && cache[curPath]){ stack.push({name:cache[curPath].n,path:curPath}); }
-  curPath=path; divs={}; map.innerHTML=''; fetchTree();
+  curPath=path; divs={}; map.innerHTML=''; expanded={}; fetchTree();
 }
-map.addEventListener('click',function(){ if(stack.length){ var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } });
+map.addEventListener('click',function(){ goUp(); });
 window.addEventListener('resize',function(){ render(); });
-document.addEventListener('keydown',function(e){ if(e.key==='Backspace'&&stack.length){ e.preventDefault(); var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } });
+document.addEventListener('keydown',function(e){
+  if(e.key==='Backspace'&&stack.length){ e.preventDefault(); goUp(); }
+  if(e.key==='Escape'&&Object.keys(expanded).length){ expanded={}; render(); }
+});
 fetchTree(); setInterval(fetchTree,600);
 </script>
 </body>
