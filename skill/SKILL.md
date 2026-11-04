@@ -86,6 +86,9 @@ manifest 不存在时先初始化：
    - **实时动态**（推荐）：`Map-Reloc.ps1 -Serve -Root C:\ -Port 8734 -Rules <rules.json>` —— 启动本地
      服务并自动打开浏览器，方块随扫描进度实时生长（每 600ms 刷新），点击任意目录按需下钻扫描，
      面包屑回退，Backspace 返回上级。Ctrl+C 停止。
+     ⚠️ ZCode 环境：后台任务（run_in_background）跑在沙箱里，沙箱对 C:\ 等盘的目录枚举会返回空
+     （不报错），导致永远扫不出数据。必须用 `Start-Process powershell -ArgumentList ...` 脱离沙箱
+     启动（-WindowStyle Hidden），或直接在用户自己的终端里运行。
    - **静态导出**：`Map-Reloc.ps1 -Root C:\ -Depth 4 -MinMB 50 -Out map.html -Rules <rules.json>` ——
      扫完后生成自包含交互式 HTML treemap。
    两种模式均剪枝 deny 目录（`-NoPruneDeny` 连系统目录一起看），永不跟随链接。

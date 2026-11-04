@@ -2,15 +2,14 @@
 # Map-Reloc.ps1 - c-relocator disk-usage mapper.
 #
 # Two modes:
-#   1) Static export (original): walk + write a self-contained HTML treemap.
+#   1) Static export: walk + write a self-contained HTML treemap.
 #        Map-Reloc.ps1 -Root C:\ -Depth 4 -MinMB 50 -Out map.html
-#   2) Live server (-Serve): starts a localhost HTTP server with a
-#      SpaceSniffer-style live viewer - blocks grow in real time while the
-#      scan runs, click any directory to lazily scan/drill into it.
+#   2) Live server (-Serve): localhost HTTP server with a SpaceSniffer-style
+#      live viewer - blocks grow in real time while scanning, click any
+#      directory to lazily scan/drill into it. Stop with Ctrl+C.
 #        Map-Reloc.ps1 -Serve -Root C:\ -Port 8734
-#      Stop with Ctrl+C.
-# Both modes: read-only, links never followed, deny-list pruning by default
-# (disable pruning with -NoPruneDeny). PowerShell 5.1+.
+# Read-only, links never followed, deny-list pruning by default
+# (-NoPruneDeny disables). PowerShell 5.1+. ASCII-only script text.
 # =====================================================================
 [CmdletBinding()]
 param(
@@ -22,10 +21,23 @@ param(
     [string]$Rules = '',
     [switch]$Serve,
     [int]$Port = 8734,
-    [int]$ServeDepth = 3
+    [int]$ServeDepth = 2
 )
 
 $ErrorActionPreference = 'Continue'
+
+# NOTE: functions must be defined before first use (script runs top-down).
+function NormPath([string]$p) {
+    # 'C:\' must stay 'C:\' - trimming the backslash turns it into 'C:',
+    # which .NET resolves to the process current directory ON that drive.
+    $p = $p.TrimEnd('\')
+    if ($p -match '^[A-Za-z]:$') { $p += '\' }
+    return $p
+}
+function NodeName([string]$p) {
+    if ($p.EndsWith(':\')) { return $p }
+    return Split-Path -Leaf $p
+}
 
 if (-not (Test-Path -LiteralPath $Root)) {
     [Console]::Error.WriteLine('root not found: ' + $Root)
@@ -36,7 +48,7 @@ if (-not $rootItem.PSIsContainer) {
     [Console]::Error.WriteLine('root is not a directory: ' + $Root)
     exit 2
 }
-$Root = $rootItem.FullName.TrimEnd('\')
+$Root = NormPath $rootItem.FullName
 $minBytes = [long]($MinMB * 1MB)
 
 # Deny prefixes from rules.json (same pruning contract as Scan-Reloc).
@@ -66,7 +78,7 @@ function New-Node([string]$name) {
 }
 
 function Get-Tree([string]$path, [int]$depthLeft) {
-    $node = New-Node (Split-Path -Leaf $path)
+    $node = New-Node (NodeName $path)
     $children = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue)
     foreach ($item in $children) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
@@ -120,18 +132,33 @@ if ($Serve) {
     $state.lock = New-Object object
     $state.trees = @{}                                    # lower(path) -> shared node
     $state.queue = New-Object System.Collections.Queue    # scan jobs
+    $state.errs = (New-Object System.Collections.ArrayList)
     $state.deny = $denyPrefixes
     $state.minBytes = $minBytes
     $state.depth = $ServeDepth
     $state.rootPath = $Root
 
+    # Worker: GCI-based enumeration (proven reliable in this context).
+    # Attaches a placeholder node per child as soon as it is discovered so
+    # the viewer shows blocks growing live instead of waiting for the scan.
     $workerScript = {
         param($state)
+        function NormPath([string]$p) {
+            $p = $p.TrimEnd('\')
+            if ($p -match '^[A-Za-z]:$') { $p += '\' }
+            return $p
+        }
         function UnderDeny([string]$p) {
             if ($state.deny.Count -eq 0) { return $false }
             $n = $p.TrimEnd('\').ToLowerInvariant()
             foreach ($d in $state.deny) { if ($n -eq $d -or $n.StartsWith($d + '\')) { return $true } }
             return $false
+        }
+        function SumTree([string]$path) {
+            $s = (Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum).Sum
+            if ($null -eq $s) { $s = 0 }
+            return [long]$s
         }
         function ScanInto($node, $path, $depthLeft) {
             $fileBytes = [long]0
@@ -142,8 +169,6 @@ if ($Serve) {
                 if ($it.PSIsContainer) {
                     if (UnderDeny $it.FullName) { continue }
                     if ($depthLeft -gt 0) {
-                        # attach a placeholder cell immediately so the viewer shows
-                        # blocks right away; ScanInto then grows it live.
                         $cn = @{ n = $it.Name; s = [long]0; done = $false; c = (New-Object System.Collections.ArrayList); path = $it.FullName.TrimEnd('\') }
                         [System.Threading.Monitor]::Enter($state.lock)
                         try { $null = $node.c.Add($cn) } finally { [System.Threading.Monitor]::Exit($state.lock) }
@@ -152,9 +177,7 @@ if ($Serve) {
                         try { $node.s += [long]$cn.s } finally { [System.Threading.Monitor]::Exit($state.lock) }
                     }
                     else {
-                        $sum = [long]0
-                        Get-ChildItem -LiteralPath $it.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
-                            ForEach-Object { $sum += [long]$_.Length }
+                        $sum = SumTree $it.FullName
                         if ($sum -ge $state.minBytes) {
                             $ln = @{ n = $it.Name; s = $sum; done = $true; c = (New-Object System.Collections.ArrayList) }
                             [System.Threading.Monitor]::Enter($state.lock)
@@ -188,7 +211,7 @@ if ($Serve) {
             [System.Threading.Monitor]::Enter($state.queue.SyncRoot)
             try { if ($state.queue.Count -gt 0) { $job = $state.queue.Dequeue() } } finally { [System.Threading.Monitor]::Exit($state.queue.SyncRoot) }
             if ($null -eq $job) { Start-Sleep -Milliseconds 250; continue }
-            $key = $job.path.TrimEnd('\').ToLowerInvariant()
+            $key = (NormPath $job.path).ToLowerInvariant()
             [System.Threading.Monitor]::Enter($state.lock)
             try {
                 $node = $state.trees[$key]
@@ -196,15 +219,23 @@ if ($Serve) {
                 $node.s = [long]0
                 $node.c = (New-Object System.Collections.ArrayList)
             } finally { [System.Threading.Monitor]::Exit($state.lock) }
-            ScanInto $node $job.path $job.depth
+            try {
+                ScanInto $node $job.path $job.depth
+            }
+            catch {
+                [System.Threading.Monitor]::Enter($state.lock)
+                try { $null = $state.errs.Add(('SCAN ' + $job.path + ' :: ' + $_.Exception.ToString())) } finally { [System.Threading.Monitor]::Exit($state.lock) }
+            }
             [System.Threading.Monitor]::Enter($state.lock)
             try { $node.done = $true } finally { [System.Threading.Monitor]::Exit($state.lock) }
         }
     }
-    $worker = [powershell]::Create()
-    $worker.AddScript($workerScript) | Out-Null
-    $worker.AddArgument($state) | Out-Null
-    $worker.BeginInvoke() | Out-Null
+    for ($wi = 0; $wi -lt 4; $wi++) {
+        $w = [powershell]::Create()
+        $w.AddScript($workerScript) | Out-Null
+        $w.AddArgument($state) | Out-Null
+        $w.BeginInvoke() | Out-Null
+    }
 
     function EscJson([string]$s) {
         $s = $s.Replace('\', '\\').Replace('"', '\"')
@@ -214,7 +245,7 @@ if ($Serve) {
     function EmitNode($node) {
         $sb = '{"n":"' + (EscJson $node.n) + '","s":' + [long]$node.s + ',"done":'
         if ($node.done) { $sb += 'true' } else { $sb += 'false' }
-        $sb += ',"p":"' + (EscJson $node.path) + '","c":['
+        $sb += ',"c":['
         $first = $true
         foreach ($ch in $node.c) {
             if (-not $first) { $sb += ',' }
@@ -225,12 +256,13 @@ if ($Serve) {
         return $sb
     }
     function GetOrStart([string]$path) {
-        $key = $path.TrimEnd('\').ToLowerInvariant()
+        $path = NormPath $path
+        $key = $path.ToLowerInvariant()
         [System.Threading.Monitor]::Enter($state.lock)
         try {
             $node = $state.trees[$key]
             if ($null -eq $node) {
-                $node = @{ n = (Split-Path -Leaf $path); s = [long]0; done = $false; c = (New-Object System.Collections.ArrayList); path = $path.TrimEnd('\') }
+                $node = @{ n = (NodeName $path); s = [long]0; done = $false; c = (New-Object System.Collections.ArrayList) }
                 $state.trees[$key] = $node
                 $state.queue.Enqueue(@{ path = $path; depth = $state.depth })
             }
@@ -262,14 +294,14 @@ if ($Serve) {
   .cell .badge{position:absolute;right:4px;top:2px;color:#ffd479;font-size:10px;pointer-events:none}
   #tip{position:fixed;display:none;background:#000d;border:1px solid #555;border-radius:4px;
        padding:5px 9px;pointer-events:none;z-index:9;max-width:520px;font-size:12px}
+  #wait{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+        color:#8a8a8a;font-size:15px;z-index:2}
+  .spin{width:34px;height:34px;margin:0 auto;border:3px solid #333;border-top-color:#7fc7ff;
+        border-radius:50%;animation:spin 0.9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
   #foot{position:absolute;bottom:0;left:0;right:0;height:30px;line-height:30px;background:#1d1d1d;
         border-top:1px solid #333;padding:0 10px;color:#999;font-size:12px;white-space:nowrap;overflow:hidden}
   #foot b{color:#ffd479}
-  #wait{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-        color:#8a8a8a;font-size:15px;z-index:2}
-  .spin{width:34px;height:34px;margin:0 auto 0 auto;border:3px solid #333;border-top-color:#7fc7ff;
-        border-radius:50%;animation:spin 0.9s linear infinite}
-  @keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
@@ -280,7 +312,7 @@ if ($Serve) {
 <div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span></div>
 <script>
 var ROOT = __ROOT__;
-var curPath = ROOT, stack = [], cache = {}, divs = {}, pollTimer = null, busy = false;
+var curPath = ROOT, stack = [], cache = {}, divs = {}, busy = false;
 var map = document.getElementById('map');
 
 function fmt(b){ if(b>=1073741824) return (b/1073741824).toFixed(2)+' GB';
@@ -329,16 +361,17 @@ function render(){
     if(!d){
       d=document.createElement('div'); d.className='cell new';
       d.dataset.k=k; map.appendChild(d); divs[k]=d;
-      setTimeout(function(el){ el.className='cell'; }, 30);
+      setTimeout(function(el){ return function(){ el.className='cell'; }; }(d), 40);
       var l=document.createElement('div'); l.className='lbl'; d.appendChild(l);
       var b=document.createElement('div'); b.className='badge'; d.appendChild(b);
-      d.onmousemove=(function(name,size,done){ return function(ev){
+      d.onmousemove=(function(n){ return function(ev){
         var t=document.getElementById('tip'); t.style.display='block';
         t.style.left=(ev.clientX+14)+'px'; t.style.top=(ev.clientY+14)+'px';
-        t.innerHTML=esc(name)+' = <b>'+fmt(size)+'</b>'+(done?'':'<br><span style="color:#ffd479">counting...</span>'); };
-      })(o.n.n,o.n.s,o.n.done);
+        t.innerHTML=esc(n.n)+' = <b>'+fmt(n.s)+'</b>'+(n.done?'':'<br><span style="color:#ffd479">counting...</span>'); };
+      })(o.n);
       d.onmouseleave=function(){ document.getElementById('tip').style.display='none'; };
-      d.onclick=(function(p,name){ return function(ev){ ev.stopPropagation(); if(p){ navigate(p); } }; })(o.n.p,o.n.n);
+      d.onclick=(function(n){ return function(ev){ ev.stopPropagation();
+        if(n.c&&n.c.length&&n.p){ navigate(n.p); } }; })(o.n);
     }
     d.style.left=o.x+'px'; d.style.top=o.y+'px';
     d.style.width=Math.max(0,o.w-2)+'px'; d.style.height=Math.max(0,o.h-2)+'px';
@@ -379,13 +412,13 @@ function fetchTree(){
   x.send(null);
 }
 function navigate(path,isChild){
-  if(isChild!==false){ stack.push({name:cache[curPath].n,path:curPath}); }
+  if(isChild!==false && cache[curPath]){ stack.push({name:cache[curPath].n,path:curPath}); }
   curPath=path; divs={}; map.innerHTML=''; fetchTree();
 }
 map.onclick=function(){ if(stack.length){ var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } };
 window.onresize=function(){ render(); };
 document.onkeydown=function(e){ if(e.key==='Backspace'&&stack.length){ e.preventDefault(); var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } };
-fetchTree(); pollTimer=setInterval(fetchTree,600);
+fetchTree(); setInterval(fetchTree,600);
 </script>
 </body>
 </html>
@@ -401,7 +434,6 @@ fetchTree(); pollTimer=setInterval(fetchTree,600);
     Write-Host ('[serve] scanning root: ' + $Root + ' (depth ' + $state.depth + ', prune < ' + $MinMB + ' MB)')
     try { Start-Process $url | Out-Null } catch { }
 
-    # seed root scan
     GetOrStart $Root | Out-Null
 
     while ($true) {
@@ -430,7 +462,7 @@ fetchTree(); pollTimer=setInterval(fetchTree,600);
                     foreach ($kv in ($target.Substring(6) -split '&')) {
                         $i = $kv.IndexOf('=')
                         if ($i -gt 0 -and $kv.Substring(0, $i) -eq 'path') {
-                            $pathVal = [System.Uri]::UnescapeDataString($kv.Substring($i + 1)).TrimEnd('\')
+                            $pathVal = NormPath ([System.Uri]::UnescapeDataString($kv.Substring($i + 1)))
                         }
                     }
                     $body = '{"error":"bad path"}'
@@ -439,6 +471,23 @@ fetchTree(); pollTimer=setInterval(fetchTree,600);
                         [System.Threading.Monitor]::Enter($state.lock)
                         try { $body = '{"node":' + (EmitNode $node) + '}' } finally { [System.Threading.Monitor]::Exit($state.lock) }
                     }
+                    $bytes = $enc.GetBytes($body)
+                    $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: " + $bytes.Length + "`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n")
+                    $stream.Write($head, 0, $head.Length); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
+                }
+                elseif ($target -eq '/debug') {
+                    $lang = $ExecutionContext.SessionState.LanguageMode
+                    [System.Threading.Monitor]::Enter($state.lock)
+                    try {
+                        $body = '{"lang":"' + $lang + '","queue":' + $state.queue.Count + ',"trees":' + $state.trees.Count + ',"errs":['
+                        $first = $true
+                        foreach ($eX in $state.errs) {
+                            if (-not $first) { $body += ',' }
+                            $body += '"' + (EscJson ([string]$eX)) + '"'
+                            $first = $false
+                        }
+                        $body += ']}'
+                    } finally { [System.Threading.Monitor]::Exit($state.lock) }
                     $bytes = $enc.GetBytes($body)
                     $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: " + $bytes.Length + "`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n")
                     $stream.Write($head, 0, $head.Length); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
