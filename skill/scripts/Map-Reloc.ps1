@@ -452,8 +452,7 @@ function layoutInto(node,x0,y0,w0,h0,keyBase,seen){
   var items=(node.c||[]).slice().sort(function(a,b){return b.s-a.s;});
   var tot=0; for(var q=0;q<items.length;q++) tot+=items[q].s;
   if(!items.length||tot<=0||w0<10||h0<10) return;
-  // 极小项折叠：面积不足以阅读(<180px²)的项不单独成块，聚合为一个"剩余"块，
-  // 避免 squarify 产出极端长宽比的细条（竖条难点难看）
+  // 第一道：面积折叠（<180px² 不单独成块）
   var MINA=180;
   var k0=(w0*h0)/tot;
   var main=[],rest=0,restN=0;
@@ -462,28 +461,75 @@ function layoutInto(node,x0,y0,w0,h0,keyBase,seen){
     if(it.s*k0>=MINA){ main.push({n:it.n,s:it.s,raw:it.s,p:it.p,f:it.f,done:it.done,c:it.c}); }
     else { rest+=it.s; restN++; }
   }
+  var aggS=rest, aggN=restN, agg=aggS>0;
   if(!main.length){
-    if(rest>0){ main.push({n:'… 剩余'+restN+'项',s:rest,raw:rest,p:null,f:1,done:true,agg:restN,c:null}); } else { return; }
-  } else if(rest*k0>=MINA){
-    main.push({n:'… 剩余'+restN+'项',s:rest,raw:rest,p:null,f:1,done:true,agg:restN,c:null});
+    if(agg){
+      var d0=getCell(keyBase+'|:agg');
+      paintCell(d0,{n:{n:'… 剩余'+aggN+'项（极小/未扫完）',s:aggS,raw:aggS,done:true,f:1,agg:aggN}},x0,y0,w0,h0,keyBase,keyBase+'|:agg',seen,0);
+      d0.style.background='#3f3f46';
+    }
+    return;
   }
-  var sum=0; for(var q3=0;q3<main.length;q3++) sum+=main[q3].s;
-  if(sum<=0) return;
   main=stableOrder(main,keyBase);
-  var k=(w0*h0)/sum;
-  var px=main.map(function(it){ return {n:it.n,s:it.s*k,raw:it.raw,p:it.p,f:it.f,done:it.done,c:it.c,agg:it.agg}; });
-  var out=[]; squarify(px,x0,y0,w0,h0,out);
+  // 第二道：形状检测——squarify 后凡最小边<5px 或长宽比>7 的"细条"并入剩余，
+  // 用底部聚合条占位（高度按占比 16px~40%），剩余项重排；迭代至无细条
+  var out=[];
+  for(var pass=0;pass<4;pass++){
+    var goodSum=0; for(var g=0;g<main.length;g++) goodSum+=main[g].s;
+    if(goodSum<=0){ main=[]; break; }
+    var stripH=agg?Math.max(18,Math.min(Math.round(h0*aggS/(goodSum+aggS)),Math.round(h0*0.4))):0;
+    var availH=h0-stripH;
+    if(availH<10){ break; }
+    var k=(w0*availH)/goodSum;
+    var px=main.map(function(it,i2){ return {n:it.n,s:it.s*k,raw:it.s,p:it.p,f:it.f,done:it.done,c:it.c,idx:i2}; });
+    out=[]; squarify(px,x0,y0,w0,availH,out);
+    var bad=false, keep={};
+    for(var b=0;b<out.length;b++){
+      var r=out[b];
+      var mx=Math.max(r.w,r.h), mn=Math.min(r.w,r.h);
+      if(mn<5||mx/mn>7){ bad=true; agg=true; aggS+=r.n.raw; aggN++; }
+      else { keep[r.n.idx]=1; }
+    }
+    if(!bad) break;
+    main=main.filter(function(it,i3){ return keep[i3]; });
+  }
+  var goodSum=0; for(var g2=0;g2<main.length;g2++) goodSum+=main[g2].s;
+  if(goodSum<=0){
+    if(agg){
+      var d1=getCell(keyBase+'|:agg');
+      paintCell(d1,{n:{n:'… 剩余'+aggN+'项（极小/未扫完）',s:aggS,raw:aggS,done:true,f:1,agg:aggN}},x0,y0,w0,h0,keyBase,keyBase+'|:agg',seen,0);
+      d1.style.background='#3f3f46';
+    }
+    return;
+  }
+  var stripH=agg?Math.max(18,Math.min(Math.round(h0*aggS/(goodSum+aggS)),Math.round(h0*0.4))):0;
+  var availH=h0-stripH;
+  if(availH<10){
+    var d2=getCell(keyBase+'|:agg');
+    paintCell(d2,{n:{n:'… 剩余'+aggN+'项（极小/未扫完）',s:aggS,raw:aggS,done:true,f:1,agg:aggN}},x0,y0,w0,h0,keyBase,keyBase+'|:agg',seen,0);
+    d2.style.background='#3f3f46';
+    return;
+  }
+  var k=(w0*availH)/goodSum;
+  var px=main.map(function(it){ return {n:it.n,s:it.s*k,raw:it.s,p:it.p,f:it.f,done:it.done,c:it.c}; });
+  out=[]; squarify(px,x0,y0,w0,availH,out);
   var depth=stack.length;
   var sep=(keyBase.charAt(keyBase.length-1)==='\\')?'':'\\';
   for(var i=0;i<out.length;i++){
-    var o=out[i], kk=keyBase+'|'+o.n.n+(o.n.agg?':agg':'');
-    var pth=o.n.agg?keyBase:(o.n.p||(keyBase+sep+o.n.n));
+    var o=out[i], kk=keyBase+'|'+o.n.n;
+    var pth=o.n.p||(keyBase+sep+o.n.n);
     var d=getCell(kk);
     paintCell(d,o,o.x,o.y,o.w,o.h,pth,kk,seen,depth+i);
-    if(!o.n.agg&&expanded[pth]&&o.n.c&&o.n.c.length){
+    if(expanded[pth]&&o.n.c&&o.n.c.length){
       var sub=cache[pth]||o.n;
       layoutInto(sub,o.x+2,o.y+16,Math.max(0,o.w-4),Math.max(0,o.h-16),pth,seen);
     }
+  }
+  if(agg&&stripH>0){
+    var akk=keyBase+'|:agg';
+    var ad=getCell(akk);
+    paintCell(ad,{n:{n:'… 剩余'+aggN+'项（极小/未扫完）',s:aggS,raw:aggS,done:true,f:1,agg:aggN}},x0,y0+availH,w0,stripH,keyBase,akk,seen,depth);
+    ad.style.background='#3f3f46';
   }
 }
 function render(){
