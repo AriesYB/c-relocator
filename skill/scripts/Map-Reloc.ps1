@@ -137,6 +137,7 @@ if ($Serve) {
     $state.minBytes = $minBytes
     $state.depth = $ServeDepth
     $state.rootPath = $Root
+    $state.version = [long]0                              # 每次增量 flush +1，SSE 靠它判断是否有新数据
 
     # Worker: GCI-based enumeration (proven reliable in this context).
     # Attaches a placeholder node per child as soon as it is discovered so
@@ -161,9 +162,10 @@ if ($Serve) {
             return [long]$s
         }
         function ScanInto($node, $path, $depthLeft) {
-            # $pending = 尚未刷入 $node.s 的字节数；周期性加锁刷新，让 viewer 看到方块实时长大
+            # $pending = 尚未刷入 $node.s 的字节数；周期性加锁刷新（16MB/400项/250ms 任一触发）
             $pending = [long]0
             $nItems = 0
+            $lastFlush = [DateTime]::UtcNow
             $bigFiles = New-Object System.Collections.ArrayList
             $children = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue)
             foreach ($it in $children) {
@@ -196,16 +198,18 @@ if ($Serve) {
                         try { $null = $bigFiles.Add($ln) } finally { [System.Threading.Monitor]::Exit($state.lock) }
                     }
                 }
-                if ($pending -ge 16MB -or ($nItems % 400) -eq 0) {
+                if ($pending -ge 16MB -or ($nItems % 400) -eq 0 -or ([DateTime]::UtcNow - $lastFlush).TotalMilliseconds -ge 250) {
                     [System.Threading.Monitor]::Enter($state.lock)
-                    try { $node.s += $pending } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                    try { $node.s += $pending; $state.version = [long]$state.version + 1 } finally { [System.Threading.Monitor]::Exit($state.lock) }
                     $pending = [long]0
+                    $lastFlush = [DateTime]::UtcNow
                 }
             }
             [System.Threading.Monitor]::Enter($state.lock)
             try {
                 $node.s += $pending
                 foreach ($b in $bigFiles) { $null = $node.c.Add($b); $node.s += [long]$b.s }
+                $state.version = [long]$state.version + 1
                 $sorted = New-Object System.Collections.ArrayList
                 foreach ($x in ($node.c | Sort-Object { [long]$_.s } -Descending)) { $null = $sorted.Add($x) }
                 $node.c = $sorted
@@ -232,7 +236,7 @@ if ($Serve) {
                 try { $null = $state.errs.Add(('SCAN ' + $job.path + ' :: ' + $_.Exception.ToString())) } finally { [System.Threading.Monitor]::Exit($state.lock) }
             }
             [System.Threading.Monitor]::Enter($state.lock)
-            try { $node.done = $true } finally { [System.Threading.Monitor]::Exit($state.lock) }
+            try { $node.done = $true; $state.version = [long]$state.version + 1 } finally { [System.Threading.Monitor]::Exit($state.lock) }
         }
     }
     for ($wi = 0; $wi -lt 4; $wi++) {
@@ -240,6 +244,76 @@ if ($Serve) {
         $w.AddScript($workerScript) | Out-Null
         $w.AddArgument($state) | Out-Null
         $w.BeginInvoke() | Out-Null
+    }
+
+    # SSE 推流 runspace：每 350ms 把订阅路径的子树快照推给浏览器（替代轮询，延迟更低）
+    $sseScript = {
+        param($state, $client, $rootPath, $subPaths, $enc)
+        function NormPath([string]$p) { $p = $p.TrimEnd('\'); if ($p -match '^[A-Za-z]:$') { $p += '\' }; return $p }
+        function EscJson([string]$s) {
+            $s = $s.Replace('\', '\\').Replace('"', '\"')
+            $s = $s.Replace("`r", '\r').Replace("`n", '\n').Replace("`t", '\t')
+            return $s
+        }
+        function EmitNode($node) {
+            $sb = '{"n":"' + (EscJson $node.n) + '","s":' + [long]$node.s + ',"done":'
+            if ($node.done) { $sb += 'true' } else { $sb += 'false' }
+            if ($node.path) { $sb += ',"p":"' + (EscJson $node.path) + '"' }
+            if ($node.f) { $sb += ',"f":1' }
+            $sb += ',"c":['
+            $first = $true
+            foreach ($ch in $node.c) { if (-not $first) { $sb += ',' }; $sb += EmitNode $ch; $first = $false }
+            $sb += ']}'
+            return $sb
+        }
+        try {
+            $stream = $client.GetStream()
+            $stream.WriteTimeout = 15000
+            $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: text/event-stream; charset=utf-8`r`nCache-Control: no-store`r`nConnection: keep-alive`r`n`r`n")
+            $stream.Write($head, 0, $head.Length)
+            $retry = [System.Text.Encoding]::ASCII.GetBytes("retry: 1000`n`n")
+            $stream.Write($retry, 0, $retry.Length); $stream.Flush()
+            $subs = @($subPaths | ForEach-Object { NormPath $_ } | Select-Object -Unique)
+            # 去冗余：被另一订阅路径包含的子路径跳过（root 序列化已覆盖其子树）
+            $subs = @($subs | Where-Object {
+                $p = $_
+                -not ($subs | Where-Object { $_ -ne $p -and $p.StartsWith($_.TrimEnd('\') + '\') })
+            })
+            $idle = 0
+            $lastVer = [long]-1
+            $lastPush = [DateTime]::MinValue
+            while ($true) {
+                $alive = $false
+                foreach ($p in $subs) {
+                    [System.Threading.Monitor]::Enter($state.lock)
+                    try { if ($null -ne $state.trees[$p.ToLowerInvariant()]) { $alive = $true } } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                }
+                if (-not $alive) { $idle++; if ($idle -gt 30) { break } } else { $idle = 0 }
+                $ver = [long]$state.version
+                if ($ver -eq $lastVer) { Start-Sleep -Milliseconds 300; continue }
+                $sinceMs = ([DateTime]::UtcNow - $lastPush).TotalMilliseconds
+                if ($sinceMs -lt 800) { Start-Sleep -Milliseconds 200; continue }
+                $payload = '{"paths":{'
+                $first = $true
+                foreach ($p in $subs) {
+                    $key = $p.ToLowerInvariant()
+                    $node = $null
+                    [System.Threading.Monitor]::Enter($state.lock)
+                    try { $node = $state.trees[$key] } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                    if ($null -ne $node) {
+                        if (-not $first) { $payload += ',' }
+                        $payload += '"' + (EscJson $p) + '":' + (EmitNode $node)
+                        $first = $false
+                    }
+                }
+                $payload += '}}'
+                $data = [System.Text.Encoding]::UTF8.GetBytes('data: ' + $payload + "`n`n")
+                $stream.Write($data, 0, $data.Length); $stream.Flush()
+                $lastVer = $ver
+                $lastPush = [DateTime]::UtcNow
+            }
+        } catch { }
+        finally { try { $client.Close() } catch { } }
     }
 
     function EscJson([string]$s) {
@@ -391,9 +465,9 @@ function getCell(kk){
       var el=ev.currentTarget, n=el.__n||{};
       if(n.f) return;
       var p=el.__path; if(!p) return;
-      if(expanded[p]){ delete expanded[p]; }
-      else { expanded[p]=1; if(!cache[p]||!(cache[p].c&&cache[p].c.length)) fetchPath(p); }
-      render();
+        if(expanded[p]){ delete expanded[p]; }
+        else { expanded[p]=1; if(!cache[p]||!(cache[p].c&&cache[p].c.length)) fetchPath(p); }
+        render(); subscribe();
     });
     d.addEventListener('dblclick',function(ev){ ev.stopPropagation();
       var el=ev.currentTarget, n=el.__n||{};
@@ -623,19 +697,43 @@ function fetchTree(){
 }
 function goUp(){
   if(!stack.length) return;
-  var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; expanded={}; fetchTree();
+  var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; expanded={}; fetchTree(); subscribe();
 }
 function navigate(path,isChild){
   if(isChild!==false && cache[curPath]){ stack.push({name:cache[curPath].n,path:curPath}); }
-  curPath=path; divs={}; map.innerHTML=''; expanded={}; fetchTree();
+  curPath=path; divs={}; map.innerHTML=''; expanded={}; fetchTree(); subscribe();
+}
+var evtSrc=null, pollTimer=null, sseFails=0;
+function subscribe(){
+  var paths=[curPath];
+  for(var p in expanded){ if(paths.indexOf(p)<0) paths.push(p); }
+  if(evtSrc){ try{ evtSrc.close(); }catch(e){} evtSrc=null; }
+  try{
+    evtSrc=new EventSource('/events?paths='+encodeURIComponent(paths.join('|')));
+    evtSrc.onmessage=function(ev){
+      sseFails=0;
+      if(pollTimer){ clearInterval(pollTimer); pollTimer=null; }
+      var w=document.getElementById('wait'); if(w.innerHTML!==waitHtml){ w.innerHTML=waitHtml; }
+      try{
+        var j=JSON.parse(ev.data);
+        for(var p2 in j.paths){ cache[p2]=j.paths[p2]; }
+        render();
+        for(var p3 in expanded){ if(!cache[p3]||!cache[p3].done) fetchPath(p3); }
+      }catch(e){}
+    };
+    evtSrc.onerror=function(){
+      sseFails++;
+      if(sseFails>=5&&!pollTimer){ pollTimer=setInterval(fetchTree,600); }
+    };
+  }catch(e){ if(!pollTimer){ pollTimer=setInterval(fetchTree,600); } }
 }
 map.addEventListener('click',function(){ goUp(); });
 window.addEventListener('resize',function(){ render(); });
 document.addEventListener('keydown',function(e){
   if(e.key==='Backspace'&&stack.length){ e.preventDefault(); goUp(); }
-  if(e.key==='Escape'&&Object.keys(expanded).length){ expanded={}; render(); }
+  if(e.key==='Escape'&&Object.keys(expanded).length){ expanded={}; render(); subscribe(); }
 });
-fetchTree(); setInterval(fetchTree,600);
+fetchTree(); subscribe();
 </script>
 </body>
 </html>
@@ -662,6 +760,7 @@ fetchTree(); setInterval(fetchTree,600);
         try {
             if (-not $listener.Pending()) { Start-Sleep -Milliseconds 120; continue }
             $client = $listener.AcceptTcpClient()
+            $handoff = $false
             try {
                 $stream = $client.GetStream()
                 $stream.ReadTimeout = 5000
@@ -678,6 +777,22 @@ fetchTree(); setInterval(fetchTree,600);
                     $bytes = $enc.GetBytes($viewerHtml)
                     $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: " + $bytes.Length + "`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n")
                     $stream.Write($head, 0, $head.Length); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
+                }
+                elseif ($target.StartsWith('/events')) {
+                    # SSE 推流：交给独立 runspace，主循环继续服务其他请求（不关闭连接）
+                    $handoff = $true
+                    $q = if ($target.Length -gt 8) { $target.Substring(8) } else { '' }
+                    $pathsVal = @()
+                    foreach ($kv in ($q -split '&')) {
+                        $i = $kv.IndexOf('=')
+                        if ($i -gt 0 -and $kv.Substring(0, $i) -eq 'paths') {
+                            $pathsVal = [System.Uri]::UnescapeDataString($kv.Substring($i + 1)) -split '\|'
+                        }
+                    }
+                    if ($pathsVal.Count -eq 0) { $pathsVal = @($Root) }
+                    $sse = [powershell]::Create()
+                    $null = $sse.AddScript($sseScript).AddArgument($state).AddArgument($client).AddArgument($Root).AddArgument([string[]]$pathsVal).AddArgument($enc)
+                    $null = $sse.BeginInvoke()
                 }
                 elseif ($target.StartsWith('/tree?')) {
                     $pathVal = ''
@@ -742,7 +857,7 @@ fetchTree(); setInterval(fetchTree,600);
                     $stream.Write($head, 0, $head.Length); $stream.Flush()
                 }
             }
-            finally { $client.Close() }
+            finally { if (-not $handoff) { $client.Close() } }
         }
         catch {
             if ($_.Exception.Message -like '*Not listening*') {
