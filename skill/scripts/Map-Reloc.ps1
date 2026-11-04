@@ -330,7 +330,7 @@ if ($Serve) {
 <script>
 var ROOT = '__ROOT__';
 var curPath = ROOT, stack = [], cache = {}, divs = {}, busy = false;
-var menuPath = '', menuSel = false, expanded = {};
+var menuPath = '', menuSel = false, expanded = {}, orderState = {};
 var map = document.getElementById('map');
 
 function fmt(b){ if(b>=1073741824) return (b/1073741824).toFixed(2)+' GB';
@@ -428,6 +428,26 @@ function paintCell(d,o,x,y,w,h,pth,kk,seen,ci){
   d.querySelector('.badge').textContent=o.n.done?'':'...';
   seen[kk]=1;
 }
+function stableOrder(arr,keyBase){
+  // 排序迟滞：新项按大小插入，旧项只有比前一名大 12% 才上移——
+  // 避免扫描中大小抖动导致方块来回换位，只有"一定程度"才交换
+  var st=orderState[keyBase];
+  if(!st){ st=orderState[keyBase]={list:[]}; }
+  var byName={};
+  for(var i=0;i<arr.length;i++) byName[arr[i].n]=arr[i];
+  var out=[];
+  for(var j=0;j<st.list.length;j++){ var it=byName[st.list[j]]; if(it){ out.push(it); delete byName[st.list[j]]; } }
+  for(var k2=0;k2<arr.length;k2++){ if(byName[arr[k2].n]){ out.push(arr[k2]); delete byName[arr[k2].n]; } }
+  var changed=true,passes=0;
+  while(changed&&passes<60){
+    changed=false;passes++;
+    for(var m=0;m<out.length-1;m++){
+      if(out[m+1].s>out[m].s*1.12){ var t=out[m];out[m]=out[m+1];out[m+1]=t;changed=true; }
+    }
+  }
+  st.list=out.map(function(x){return x.n;});
+  return out;
+}
 function layoutInto(node,x0,y0,w0,h0,keyBase,seen){
   var items=(node.c||[]).slice().sort(function(a,b){return b.s-a.s;});
   var tot=0; for(var q=0;q<items.length;q++) tot+=items[q].s;
@@ -449,6 +469,7 @@ function layoutInto(node,x0,y0,w0,h0,keyBase,seen){
   }
   var sum=0; for(var q3=0;q3<main.length;q3++) sum+=main[q3].s;
   if(sum<=0) return;
+  main=stableOrder(main,keyBase);
   var k=(w0*h0)/sum;
   var px=main.map(function(it){ return {n:it.n,s:it.s*k,raw:it.raw,p:it.p,f:it.f,done:it.done,c:it.c,agg:it.agg}; });
   var out=[]; squarify(px,x0,y0,w0,h0,out);
