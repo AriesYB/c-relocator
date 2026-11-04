@@ -370,6 +370,11 @@ if ($Serve) {
                    width .35s cubic-bezier(.2,.7,.3,1),height .35s cubic-bezier(.2,.7,.3,1),opacity .4s}
   .cell.new{opacity:0}
   .cell.expd{border:1px solid #ffd479}
+  .cell.counting>.lbl{color:#ffd479}
+  .cell.counting::after{content:'';position:absolute;left:0;top:0;right:0;bottom:0;pointer-events:none;
+    background:repeating-linear-gradient(45deg,rgba(255,255,255,0) 0 8px,rgba(255,255,255,.07) 8px 16px);
+    animation:scanmv .8s linear infinite}
+  @keyframes scanmv{to{background-position:22.63px 0}}
   .cell.expd>.lbl{left:0;top:0;right:0;height:15px;line-height:15px;padding:0 4px;
                   background:rgba(10,10,10,.72);border-bottom:1px solid #b8860b;overflow:hidden}
   .cell .lbl{position:absolute;left:4px;top:2px;right:4px;pointer-events:none;
@@ -386,19 +391,29 @@ if ($Serve) {
   #foot{position:absolute;bottom:0;left:0;right:0;height:30px;line-height:30px;background:#1d1d1d;
         border-top:1px solid #333;padding:0 10px;color:#999;font-size:12px;white-space:nowrap;overflow:hidden}
   #foot b{color:#ffd479}
-  #ctx{position:fixed;display:none;background:#232323;border:1px solid #555;border-radius:4px;
-       padding:9px 13px;z-index:10;cursor:pointer;max-width:430px;box-shadow:0 4px 14px #000c}
-  #ctx:hover{background:#2c4a66}
-  #ctxi{color:#7fc7ff;font-weight:600}
-  #ctxc{color:#7fc7ff;font-weight:600;margin-bottom:4px}
-  #ctxp{color:#999;font-size:11px;margin-top:3px;word-break:break-all}
+  #ctx{position:fixed;display:none;background:#252528;border:1px solid #43434a;border-radius:6px;
+       padding:4px;z-index:20;min-width:236px;max-width:440px;box-shadow:0 8px 28px #000e;font-size:12px}
+  #ctxpath{padding:7px 10px;color:#9a9aa2;font-size:11px;border-bottom:1px solid #3d3d42;
+           word-break:break-all;max-height:52px;overflow:hidden;margin-bottom:4px;cursor:default;
+           background:#1d1d21;border-radius:4px 4px 0 0}
+  .mi{display:flex;align-items:center;gap:9px;padding:6px 10px;border-radius:4px;cursor:pointer;color:#d6d6da}
+  .mi:hover{background:#2f4d6e;color:#fff}
+  .mi .ic{width:16px;text-align:center;flex:none}
+  #ctx .sep{height:1px;background:#3d3d42;margin:4px 6px}
 </style>
 </head>
 <body>
 <div id="bar"></div>
 <div id="map"></div>
 <div id="tip"></div>
-<div id="ctx"><div id="ctxc">复制完整路径</div><div id="ctxi"></div><div id="ctxp"></div></div>
+<div id="ctx">
+  <div id="ctxpath"></div>
+  <div class="mi" id="mi-open"><span class="ic">📂</span><span id="mi-open-t">在资源管理器中打开</span></div>
+  <div class="mi" id="mi-copy"><span class="ic">📋</span><span id="mi-copy-t">复制完整路径</span></div>
+  <div class="sep"></div>
+  <div class="mi" id="mi-enter"><span class="ic">↯</span><span>进入此目录</span></div>
+  <div class="mi" id="mi-expand"><span class="ic">⊞</span><span id="mi-expand-t">展开</span></div>
+</div>
 <div id="wait"><div><div class="spin"></div><div style="margin-top:12px">counting directories... blocks appear as each finishes</div></div></div>
 <div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span> · 单击展开/收起 · 双击进入 · Backspace/⬅ 返回 · Esc 收起 · 右键打开文件夹</div>
 <script>
@@ -477,13 +492,18 @@ function getCell(kk){
     d.addEventListener('contextmenu',function(ev){ ev.preventDefault(); ev.stopPropagation();
       var el=ev.currentTarget, n=el.__n||{};
       var fp=el.__path||n.p||'';
-      var c=document.getElementById('ctx');
-      document.getElementById('ctxi').textContent=n.f?'打开所在文件夹（并选中）':'在资源管理器中打开';
-      document.getElementById('ctxp').textContent=fp;
       menuPath=fp; menuSel=!!n.f;
+      var isFile=!!n.f;
+      document.getElementById('mi-open-t').textContent=isFile?'打开所在文件夹（并选中）':'在资源管理器中打开';
+      document.getElementById('mi-enter').style.display=isFile?'none':'';
+      document.getElementById('mi-expand').style.display=isFile?'none':'';
+      document.getElementById('mi-expand-t').textContent=expanded[fp]?'收起':'展开';
+      document.getElementById('mi-copy-t').textContent='复制完整路径';
+      document.getElementById('ctxpath').textContent=fp;
+      var c=document.getElementById('ctx');
       c.style.display='block';
-      c.style.left=Math.min(ev.clientX,window.innerWidth-450)+'px';
-      c.style.top=Math.min(ev.clientY,window.innerHeight-90)+'px';
+      c.style.left=Math.min(ev.clientX,window.innerWidth-256)+'px';
+      c.style.top=Math.min(ev.clientY,window.innerHeight-200)+'px';
     });
   }
   return d;
@@ -494,6 +514,7 @@ function paintCell(d,o,x,y,w,h,pth,kk,seen,ci){
   d.style.width=Math.max(0,w-2)+'px'; d.style.height=Math.max(0,h-2)+'px';
   d.style.background=o.n.f?(o.n.agg?'#3f3f46':'#6e6e6e'):colors(ci);
   d.classList.toggle('expd',!!expanded[pth]);
+  d.classList.toggle('counting',!o.n.done);
   var lbl=d.querySelector('.lbl');
   lbl.textContent=o.n.n+'  '+fmt(o.n.raw)+(expanded[pth]?' ▾':'');
   lbl.style.fontSize=(w>180&&h>50)?'14px':'11px';
@@ -648,12 +669,10 @@ function netFail(){
 }
 function openPath(p,sel){ var x=new XMLHttpRequest();
   x.open('GET','/open?path='+encodeURIComponent(p)+(sel?'&sel=1':''),true); x.send(null); }
-function copyPath(p){
-  var c=document.getElementById('ctxc');
-  function ok(){ c.textContent='已复制 ✓';
-    setTimeout(function(){ c.textContent='复制完整路径'; },900); }
-  function fail(){ c.textContent='复制失败，请手动记录';
-    setTimeout(function(){ c.textContent='复制完整路径'; },1500); }
+function copyPath(p,fbEl){
+  function restore(){ if(fbEl) fbEl.textContent='复制完整路径'; }
+  function ok(){ if(fbEl){ fbEl.textContent='✓ 已复制'; setTimeout(restore,900); } }
+  function fail(){ if(fbEl){ fbEl.textContent='复制失败'; setTimeout(restore,1200); } }
   function fallback(){ var t=document.createElement('textarea'); t.value=p;
     document.body.appendChild(t); t.select();
     var done=false; try{ done=document.execCommand('copy'); }catch(e){ }
@@ -663,11 +682,25 @@ function copyPath(p){
     navigator.clipboard.writeText(p).then(ok,fallback);
   } else { fallback(); }
 }
-document.addEventListener('click',function(){ document.getElementById('ctx').style.display='none'; });
-document.getElementById('ctxc').addEventListener('click',function(e2){ e2.stopPropagation();
-  copyPath(menuPath); });
-document.getElementById('ctx').addEventListener('click',function(e2){ e2.stopPropagation();
-  openPath(menuPath,menuSel); document.getElementById('ctx').style.display='none'; });
+function hideCtx(){ document.getElementById('ctx').style.display='none'; }
+document.getElementById('mi-open').addEventListener('click',function(){ openPath(menuPath,menuSel); hideCtx(); });
+document.getElementById('mi-copy').addEventListener('click',function(){
+  copyPath(menuPath,document.getElementById('mi-copy-t')); setTimeout(hideCtx,650); });
+document.getElementById('mi-enter').addEventListener('click',function(){
+  if(menuPath&&!menuSel){ navigate(menuPath); } hideCtx(); });
+document.getElementById('mi-expand').addEventListener('click',function(){
+  var p=menuPath;
+  if(p&&!menuSel){
+    if(expanded[p]){ delete expanded[p]; }
+    else { expanded[p]=1; if(!cache[p]||!(cache[p].c&&cache[p].c.length)) fetchPath(p); }
+    render();
+  }
+  hideCtx();
+});
+document.addEventListener('mousedown',function(ev){
+  var c=document.getElementById('ctx');
+  if(c.style.display==='block'&&!c.contains(ev.target)) c.style.display='none';
+},true);
 function fetchPath(p){
   var x=new XMLHttpRequest();
   x.open('GET','/tree?path='+encodeURIComponent(p),true);
@@ -731,7 +764,8 @@ map.addEventListener('click',function(){ goUp(); });
 window.addEventListener('resize',function(){ render(); });
 document.addEventListener('keydown',function(e){
   if(e.key==='Backspace'&&stack.length){ e.preventDefault(); goUp(); }
-  if(e.key==='Escape'&&Object.keys(expanded).length){ expanded={}; render(); subscribe(); }
+  if(e.key==='Escape'){ hideCtx();
+    if(Object.keys(expanded).length){ expanded={}; render(); subscribe(); } }
 });
 fetchTree(); subscribe();
 </script>
