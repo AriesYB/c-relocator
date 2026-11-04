@@ -296,6 +296,8 @@ if ($Serve) {
                    width .35s cubic-bezier(.2,.7,.3,1),height .35s cubic-bezier(.2,.7,.3,1),opacity .4s}
   .cell.new{opacity:0}
   .cell.expd{border:1px solid #ffd479}
+  .cell.expd>.lbl{left:0;top:0;right:0;height:15px;line-height:15px;padding:0 4px;
+                  background:rgba(10,10,10,.72);border-bottom:1px solid #b8860b;overflow:hidden}
   .cell .lbl{position:absolute;left:4px;top:2px;right:4px;pointer-events:none;
              text-shadow:0 1px 3px #000;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
   .cell.big .lbl{font-size:15px;font-weight:600}
@@ -314,6 +316,7 @@ if ($Serve) {
        padding:9px 13px;z-index:10;cursor:pointer;max-width:430px;box-shadow:0 4px 14px #000c}
   #ctx:hover{background:#2c4a66}
   #ctxi{color:#7fc7ff;font-weight:600}
+  #ctxc{color:#7fc7ff;font-weight:600;margin-bottom:4px}
   #ctxp{color:#999;font-size:11px;margin-top:3px;word-break:break-all}
 </style>
 </head>
@@ -321,7 +324,7 @@ if ($Serve) {
 <div id="bar"></div>
 <div id="map"></div>
 <div id="tip"></div>
-<div id="ctx"><div id="ctxi"></div><div id="ctxp"></div></div>
+<div id="ctx"><div id="ctxc">复制完整路径</div><div id="ctxi"></div><div id="ctxp"></div></div>
 <div id="wait"><div><div class="spin"></div><div style="margin-top:12px">counting directories... blocks appear as each finishes</div></div></div>
 <div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span> · 单击展开/收起 · 双击进入 · Backspace/⬅ 返回 · Esc 收起 · 右键打开文件夹</div>
 <script>
@@ -420,6 +423,8 @@ function paintCell(d,o,x,y,w,h,pth,kk,seen,ci){
   var lbl=d.querySelector('.lbl');
   lbl.textContent=o.n.n+'  '+fmt(o.n.raw)+(expanded[pth]?' ▾':'');
   lbl.style.fontSize=(w>180&&h>50)?'14px':'11px';
+  lbl.style.paddingLeft=expanded[pth]?
+    (4+Math.max(0,pth.split('\\').length-curPath.split('\\').length)*12)+'px':'';
   d.querySelector('.badge').textContent=o.n.done?'':'...';
   seen[kk]=1;
 }
@@ -503,7 +508,24 @@ function netFail(){
 }
 function openPath(p,sel){ var x=new XMLHttpRequest();
   x.open('GET','/open?path='+encodeURIComponent(p)+(sel?'&sel=1':''),true); x.send(null); }
+function copyPath(p){
+  var c=document.getElementById('ctxc');
+  function ok(){ c.textContent='已复制 ✓';
+    setTimeout(function(){ c.textContent='复制完整路径'; },900); }
+  function fail(){ c.textContent='复制失败，请手动记录';
+    setTimeout(function(){ c.textContent='复制完整路径'; },1500); }
+  function fallback(){ var t=document.createElement('textarea'); t.value=p;
+    document.body.appendChild(t); t.select();
+    var done=false; try{ done=document.execCommand('copy'); }catch(e){ }
+    document.body.removeChild(t);
+    if(done){ ok(); } else { fail(); } }
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(p).then(ok,fallback);
+  } else { fallback(); }
+}
 document.addEventListener('click',function(){ document.getElementById('ctx').style.display='none'; });
+document.getElementById('ctxc').addEventListener('click',function(e2){ e2.stopPropagation();
+  copyPath(menuPath); });
 document.getElementById('ctx').addEventListener('click',function(e2){ e2.stopPropagation();
   openPath(menuPath,menuSel); document.getElementById('ctx').style.display='none'; });
 function fetchPath(p){
