@@ -363,6 +363,97 @@ function squarify(items,x,y,w,h,out){
   }
   if(row.length&&w>1&&h>1) layoutRow(row,x,y,w,h,out);
 }
+function getCell(kk){
+  var d=divs[kk];
+  if(!d){
+    d=document.createElement('div'); d.className='cell new';
+    d.dataset.k=kk; map.appendChild(d); divs[kk]=d;
+    setTimeout(function(el){ return function(){ el.className='cell'; }; }(d), 40);
+    var l=document.createElement('div'); l.className='lbl'; d.appendChild(l);
+    var b=document.createElement('div'); b.className='badge'; d.appendChild(b);
+    d.style.cursor='pointer';
+    d.addEventListener('mousemove',function(ev){
+      var el=ev.currentTarget, n=el.__n||{};
+      var t=document.getElementById('tip'); t.style.display='block';
+      t.style.left=Math.min(ev.clientX+14,window.innerWidth-560)+'px';
+      t.style.top=(ev.clientY+14)+'px';
+      var fp=el.__path||n.p||'';
+      t.innerHTML='<div style="color:#9fd1ff;word-break:break-all">'+esc(fp)+'</div><b>'+fmt(n.raw)+'</b>'+
+        (n.f?'<span style="color:#888"> · 文件</span>':'<span style="color:#888"> · 目录 · 单击展开/收起 · 双击进入</span>')+
+        (n.done?'':'<br><span style="color:#ffd479">counting...</span>')+
+        '<br><span style="color:#888">右键：'+(n.f?'打开所在文件夹':'在资源管理器中打开')+'</span>';
+    });
+    d.addEventListener('mouseleave',function(){ document.getElementById('tip').style.display='none'; });
+    d.addEventListener('click',function(ev){ ev.stopPropagation();
+      var el=ev.currentTarget, n=el.__n||{};
+      if(n.f) return;
+      var p=el.__path; if(!p) return;
+      if(expanded[p]){ delete expanded[p]; }
+      else { expanded[p]=1; if(!cache[p]||!(cache[p].c&&cache[p].c.length)) fetchPath(p); }
+      render();
+    });
+    d.addEventListener('dblclick',function(ev){ ev.stopPropagation();
+      var el=ev.currentTarget, n=el.__n||{};
+      if(n.f) return;
+      var p=el.__path;
+      if(p){ navigate(p); } });
+    d.addEventListener('contextmenu',function(ev){ ev.preventDefault(); ev.stopPropagation();
+      var el=ev.currentTarget, n=el.__n||{};
+      var fp=el.__path||n.p||'';
+      var c=document.getElementById('ctx');
+      document.getElementById('ctxi').textContent=n.f?'打开所在文件夹（并选中）':'在资源管理器中打开';
+      document.getElementById('ctxp').textContent=fp;
+      menuPath=fp; menuSel=!!n.f;
+      c.style.display='block';
+      c.style.left=Math.min(ev.clientX,window.innerWidth-450)+'px';
+      c.style.top=Math.min(ev.clientY,window.innerHeight-90)+'px';
+    });
+  }
+  return d;
+}
+function paintCell(d,o,x,y,w,h,pth,kk,seen,ci){
+  d.__n=o.n; d.__path=pth;
+  d.style.left=x+'px'; d.style.top=y+'px';
+  d.style.width=Math.max(0,w-2)+'px'; d.style.height=Math.max(0,h-2)+'px';
+  d.style.background=colors(ci);
+  d.classList.toggle('expd',!!expanded[pth]);
+  var lbl=d.querySelector('.lbl');
+  lbl.textContent=o.n.n+'  '+fmt(o.n.raw)+(expanded[pth]?' ▾':'');
+  lbl.style.fontSize=(w>180&&h>50)?'14px':'11px';
+  d.querySelector('.badge').textContent=o.n.done?'':'...';
+  seen[kk]=1;
+}
+function renderBars(sub,ax,ay,aw,ah,keyBase,seen,indent,depth){
+  var RH=16;
+  var items=(sub.c||[]).slice().sort(function(a,b){return b.s-a.s;});
+  var tot=0;for(var q=0;q<items.length;q++)tot+=items[q].s;
+  if(tot<=0||ah<RH) return 0;
+  var sep=(keyBase.charAt(keyBase.length-1)==='\\')?'':'\\';
+  var W=Math.max(30,aw-indent);
+  var used=0,hidden=0;
+  for(var i=0;i<items.length;i++){
+    if(used+RH>ah){ hidden=items.length-i; break; }
+    var it=items[i];
+    var pth=it.p||(keyBase+sep+it.n);
+    var pxi={n:it.n,s:it.s,raw:it.s,p:it.p,f:it.f,done:it.done,c:it.c};
+    var bw=Math.max(2,Math.round(W*it.s/tot));
+    var kk=keyBase+'|'+it.n;
+    var d=getCell(kk);
+    paintCell(d,{n:pxi},ax+indent,ay+used,bw,RH,pth,kk,seen,depth+i);
+    used+=RH;
+    if(expanded[pth]&&it.c&&it.c.length){
+      used+=renderBars(cache[pth]||it,ax,ay+used,aw,Math.max(0,ah-used),pth,seen,indent+12,depth);
+    }
+  }
+  if(hidden){
+    var kk2=keyBase+'|__more__';
+    var d2=getCell(kk2);
+    paintCell(d2,{n:{n:'… +'+hidden+' more',s:0,raw:0,done:true,f:1}},ax+indent,ay+used,Math.max(80,Math.round(W*0.35)),RH,keyBase,kk2,seen,depth);
+    d2.style.pointerEvents='none';
+    used+=RH;
+  }
+  return used;
+}
 function layoutInto(node,x0,y0,w0,h0,keyBase,seen){
   var items=(node.c||[]).slice().sort(function(a,b){return b.s-a.s;});
   var tot=0; for(var q=0;q<items.length;q++) tot+=items[q].s;
@@ -373,65 +464,13 @@ function layoutInto(node,x0,y0,w0,h0,keyBase,seen){
   var depth=stack.length;
   var sep=(keyBase.charAt(keyBase.length-1)==='\\')?'':'\\';
   for(var i=0;i<out.length;i++){
-    var o=out[i], kk=keyBase+'|'+o.n.n, d=divs[kk];
-    if(!d){
-      d=document.createElement('div'); d.className='cell new';
-      d.dataset.k=kk; map.appendChild(d); divs[kk]=d;
-      setTimeout(function(el){ return function(){ el.className='cell'; }; }(d), 40);
-      var l=document.createElement('div'); l.className='lbl'; d.appendChild(l);
-      var b=document.createElement('div'); b.className='badge'; d.appendChild(b);
-      d.style.cursor='pointer';
-      d.addEventListener('mousemove',function(ev){
-        var el=ev.currentTarget, n=el.__n||{};
-        var t=document.getElementById('tip'); t.style.display='block';
-        t.style.left=Math.min(ev.clientX+14,window.innerWidth-560)+'px';
-        t.style.top=(ev.clientY+14)+'px';
-        var fp=el.__path||n.p||'';
-        t.innerHTML='<div style="color:#9fd1ff;word-break:break-all">'+esc(fp)+'</div><b>'+fmt(n.raw)+'</b>'+
-          (n.f?'<span style="color:#888"> · 文件</span>':'<span style="color:#888"> · 目录 · 单击展开/收起 · 双击进入</span>')+
-          (n.done?'':'<br><span style="color:#ffd479">counting...</span>')+
-          '<br><span style="color:#888">右键：'+(n.f?'打开所在文件夹':'在资源管理器中打开')+'</span>';
-      });
-      d.addEventListener('mouseleave',function(){ document.getElementById('tip').style.display='none'; });
-      d.addEventListener('click',function(ev){ ev.stopPropagation();
-        var el=ev.currentTarget, n=el.__n||{};
-        if(n.f) return;
-        var p=el.__path; if(!p) return;
-        if(expanded[p]){ delete expanded[p]; }
-        else { expanded[p]=1; if(!cache[p]||!(cache[p].c&&cache[p].c.length)) fetchPath(p); }
-        render();
-      });
-      d.addEventListener('dblclick',function(ev){ ev.stopPropagation();
-        var el=ev.currentTarget, n=el.__n||{};
-        if(n.f) return;
-        var p=el.__path;
-        if(p){ navigate(p); } });
-      d.addEventListener('contextmenu',function(ev){ ev.preventDefault(); ev.stopPropagation();
-        var el=ev.currentTarget, n=el.__n||{};
-        var fp=el.__path||n.p||'';
-        var c=document.getElementById('ctx');
-        document.getElementById('ctxi').textContent=n.f?'打开所在文件夹（并选中）':'在资源管理器中打开';
-        document.getElementById('ctxp').textContent=fp;
-        menuPath=fp; menuSel=!!n.f;
-        c.style.display='block';
-        c.style.left=Math.min(ev.clientX,window.innerWidth-450)+'px';
-        c.style.top=Math.min(ev.clientY,window.innerHeight-90)+'px';
-      });
-    }
+    var o=out[i], kk=keyBase+'|'+o.n.n;
     var pth=o.n.p||(keyBase+sep+o.n.n);
-    d.__n=o.n; d.__path=pth;
-    d.style.left=o.x+'px'; d.style.top=o.y+'px';
-    d.style.width=Math.max(0,o.w-2)+'px'; d.style.height=Math.max(0,o.h-2)+'px';
-    d.style.background=colors(depth+i);
-    d.classList.toggle('expd',!!expanded[pth]);
-    var lbl=d.querySelector('.lbl');
-    lbl.textContent=o.n.n+'  '+fmt(o.n.raw)+(expanded[pth]?' ▾':'');
-    lbl.style.fontSize=(o.w>180&&o.h>50)?'14px':'11px';
-    d.querySelector('.badge').textContent=o.n.done?'':'...';
-    seen[kk]=1;
-    if(expanded[pth]&&o.n.c){
+    var d=getCell(kk);
+    paintCell(d,o,o.x,o.y,o.w,o.h,pth,kk,seen,depth+i);
+    if(expanded[pth]&&o.n.c&&o.n.c.length){
       var sub=cache[pth]||o.n;
-      layoutInto(sub,o.x+2,o.y+15,Math.max(0,o.w-5),Math.max(0,o.h-17),pth,seen);
+      renderBars(sub,o.x+2,o.y+16,Math.max(0,o.w-4),Math.max(0,o.h-16),pth,seen,0,depth);
     }
   }
 }
