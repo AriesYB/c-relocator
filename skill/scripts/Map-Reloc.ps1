@@ -142,10 +142,14 @@ if ($Serve) {
                 if ($it.PSIsContainer) {
                     if (UnderDeny $it.FullName) { continue }
                     if ($depthLeft -gt 0) {
-                        $cn = @{ n = $it.Name; s = [long]0; done = $false; c = (New-Object System.Collections.ArrayList) }
+                        # attach a placeholder cell immediately so the viewer shows
+                        # blocks right away; ScanInto then grows it live.
+                        $cn = @{ n = $it.Name; s = [long]0; done = $false; c = (New-Object System.Collections.ArrayList); path = $it.FullName.TrimEnd('\') }
+                        [System.Threading.Monitor]::Enter($state.lock)
+                        try { $null = $node.c.Add($cn) } finally { [System.Threading.Monitor]::Exit($state.lock) }
                         ScanInto $cn $it.FullName ($depthLeft - 1)
                         [System.Threading.Monitor]::Enter($state.lock)
-                        try { $null = $node.c.Add($cn); $node.s += [long]$cn.s } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                        try { $node.s += [long]$cn.s } finally { [System.Threading.Monitor]::Exit($state.lock) }
                     }
                     else {
                         $sum = [long]0
@@ -261,12 +265,18 @@ if ($Serve) {
   #foot{position:absolute;bottom:0;left:0;right:0;height:30px;line-height:30px;background:#1d1d1d;
         border-top:1px solid #333;padding:0 10px;color:#999;font-size:12px;white-space:nowrap;overflow:hidden}
   #foot b{color:#ffd479}
+  #wait{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+        color:#8a8a8a;font-size:15px;z-index:2}
+  .spin{width:34px;height:34px;margin:0 auto 0 auto;border:3px solid #333;border-top-color:#7fc7ff;
+        border-radius:50%;animation:spin 0.9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
 <div id="bar"></div>
 <div id="map"></div>
 <div id="tip"></div>
+<div id="wait"><div><div class="spin"></div><div style="margin-top:12px">counting directories... blocks appear as each finishes</div></div></div>
 <div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span></div>
 <script>
 var ROOT = __ROOT__;
@@ -310,7 +320,9 @@ function render(){
   var node = cache[curPath]; if(!node) return;
   var W = map.clientWidth, H = map.clientHeight;
   var items = (node.c||[]).slice().sort(function(a,b){return b.s-a.s;});
-  var out = []; squarify(items,0,0,W,H,out);
+  var wait = document.getElementById('wait');
+  wait.style.display = items.length? 'none':'flex';
+  var out = []; if(items.length) squarify(items,0,0,W,H,out);
   var seen = {}, depth = stack.length;
   for(var i=0;i<out.length;i++){
     var o=out[i], k=curPath.toLowerCase()+'|'+o.n.n, d=divs[k];
@@ -326,6 +338,7 @@ function render(){
         t.innerHTML=esc(name)+' = <b>'+fmt(size)+'</b>'+(done?'':'<br><span style="color:#ffd479">counting...</span>'); };
       })(o.n.n,o.n.s,o.n.done);
       d.onmouseleave=function(){ document.getElementById('tip').style.display='none'; };
+      d.onclick=(function(p,name){ return function(ev){ ev.stopPropagation(); if(p){ navigate(p); } }; })(o.n.p,o.n.n);
     }
     d.style.left=o.x+'px'; d.style.top=o.y+'px';
     d.style.width=Math.max(0,o.w-2)+'px'; d.style.height=Math.max(0,o.h-2)+'px';
