@@ -238,3 +238,21 @@ Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>] [-Al
 - WSL / Docker 用官方迁移（`wsl --export/--import`；Docker 设置里改 disk image location），规则库有标注，不要用 junction 硬搬虚拟磁盘所在目录。
 - 浏览器等 medium risk 条目：默认只在 audit 提示，不主动 migrate。
 - Git Bash 里调 cmd 内建命令用 `cmd //c '...'`（双斜杠防 MSYS 路径转义），路径参数用反斜杠形式。
+
+### live map（Map-Reloc -Serve）踩坑实录
+
+- **多实例**：重复启动会撞端口。症状：后台日志无限刷 `[serve] request error: Not listening`。
+  排查：`Get-NetTCPConnection -LocalPort 8734 -State Listen` 拿 OwningProcess，再比对
+  `Get-CimInstance Win32_Process` 的 CommandLine 找出多余实例杀掉。脚本现已在端口被占时
+  明确报错退出，不再无限刷。
+- **浏览器代理截 localhost**（国内开代理用户高频事故）：页面请求被代理吞掉 → 永远转圈。
+  viewer 内置 4s 超时 + 连续失败横幅提示把 127.0.0.1/localhost 加入直连列表。验证服务本身
+  用 `curl --noproxy '*' http://127.0.0.1:<port>/debug`。
+- **HTML 模板占位符必须带引号**：`var ROOT='__ROOT__'` 不能写成 `var ROOT=__ROOT__`——裸值替换
+  产生 `var ROOT=C:\` → 整段脚本语法错误 → 页面黑屏且控制台之外零提示。服务端 curl 200、
+  接口正常，唯独页面死了，极易误判成网络/代理问题。
+- **treemap 布局前必须归一化**：squarify 的输入是"面积"，拿原始字节数当像素算，一个 60GB
+  目录会算出千万像素宽的格子吃掉整个画布（live 版其余方块全变 0，静态版页面被撑成无尽滚动）。
+  正确做法：`k=W*H/总字节`，每项 `s×k` 后再进 squarify，标签/悬浮提示仍用原始字节。
+- **服务端验证 ≠ 页面验证**：改 viewer JS 后必须用真实浏览器打开看一眼（或 `new Function(
+  script文本)` 验语法），curl 只能证明服务端活着。

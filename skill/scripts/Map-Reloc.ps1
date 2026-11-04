@@ -179,7 +179,7 @@ if ($Serve) {
                     else {
                         $sum = SumTree $it.FullName
                         if ($sum -ge $state.minBytes) {
-                            $ln = @{ n = $it.Name; s = $sum; done = $true; c = (New-Object System.Collections.ArrayList) }
+                            $ln = @{ n = $it.Name; s = $sum; done = $true; c = (New-Object System.Collections.ArrayList); path = $it.FullName }
                             [System.Threading.Monitor]::Enter($state.lock)
                             try { $null = $node.c.Add($ln); $node.s += $sum } finally { [System.Threading.Monitor]::Exit($state.lock) }
                         }
@@ -245,6 +245,7 @@ if ($Serve) {
     function EmitNode($node) {
         $sb = '{"n":"' + (EscJson $node.n) + '","s":' + [long]$node.s + ',"done":'
         if ($node.done) { $sb += 'true' } else { $sb += 'false' }
+        if ($node.path) { $sb += ',"p":"' + (EscJson $node.path) + '"' }
         $sb += ',"c":['
         $first = $true
         foreach ($ch in $node.c) {
@@ -311,7 +312,7 @@ if ($Serve) {
 <div id="wait"><div><div class="spin"></div><div style="margin-top:12px">counting directories... blocks appear as each finishes</div></div></div>
 <div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span></div>
 <script>
-var ROOT = __ROOT__;
+var ROOT = '__ROOT__';
 var curPath = ROOT, stack = [], cache = {}, divs = {}, busy = false;
 var map = document.getElementById('map');
 
@@ -353,8 +354,14 @@ function render(){
   var W = map.clientWidth, H = map.clientHeight;
   var items = (node.c||[]).slice().sort(function(a,b){return b.s-a.s;});
   var wait = document.getElementById('wait');
-  wait.style.display = items.length? 'none':'flex';
-  var out = []; if(items.length) squarify(items,0,0,W,H,out);
+  var tot=0; for(var q=0;q<items.length;q++) tot+=items[q].s;
+  wait.style.display = (items.length&&tot>0)? 'none':'flex';
+  var out = [];
+  if(items.length&&tot>0&&W>1&&H>1){
+    var k=(W*H)/tot;
+    var px=items.map(function(it){ return {n:it.n,s:it.s*k,raw:it.s,p:it.p,done:it.done,c:it.c}; });
+    squarify(px,0,0,W,H,out);
+  }
   var seen = {}, depth = stack.length;
   for(var i=0;i<out.length;i++){
     var o=out[i], k=curPath.toLowerCase()+'|'+o.n.n, d=divs[k];
@@ -367,7 +374,7 @@ function render(){
       d.onmousemove=(function(n){ return function(ev){
         var t=document.getElementById('tip'); t.style.display='block';
         t.style.left=(ev.clientX+14)+'px'; t.style.top=(ev.clientY+14)+'px';
-        t.innerHTML=esc(n.n)+' = <b>'+fmt(n.s)+'</b>'+(n.done?'':'<br><span style="color:#ffd479">counting...</span>'); };
+        t.innerHTML=esc(n.n)+' = <b>'+fmt(n.raw)+'</b>'+(n.done?'':'<br><span style="color:#ffd479">counting...</span>'); };
       })(o.n);
       d.onmouseleave=function(){ document.getElementById('tip').style.display='none'; };
       d.onclick=(function(n){ return function(ev){ ev.stopPropagation();
@@ -377,7 +384,7 @@ function render(){
     d.style.width=Math.max(0,o.w-2)+'px'; d.style.height=Math.max(0,o.h-2)+'px';
     d.style.background=colors(depth+i);
     var lbl=d.querySelector('.lbl');
-    lbl.textContent=o.n.n+'  '+fmt(o.n.s);
+    lbl.textContent=o.n.n+'  '+fmt(o.n.raw);
     lbl.style.fontSize=(o.w>180&&o.h>50)?'14px':'11px';
     d.querySelector('.badge').textContent=o.n.done?'':'...';
     seen[k]=1;
@@ -401,14 +408,28 @@ function drawBar(node){
   document.getElementById('stat').innerHTML=node.done?
     '<b>done</b> - click any block to drill in':'<b>counting...</b> blocks grow live';
 }
+var fails=0, waitHtml=document.getElementById('wait').innerHTML;
+function netFail(){
+  busy=false; fails++;
+  if(fails>=3){ var w=document.getElementById('wait'); w.style.display='flex'; w.innerHTML=
+    '<div style="text-align:center;max-width:560px;padding:0 16px">'+
+    '<div style="color:#ff7b7b;font-size:15px;margin-bottom:8px">无法连接 127.0.0.1:8734（已试 '+fails+' 次）</div>'+
+    '<div style="color:#bbb;line-height:1.7">浏览器代理可能拦截了 localhost 请求。<br>'+
+    '请把 <b style="color:#ffd479">127.0.0.1 / localhost</b> 加入代理软件的直连(绕过)列表，<br>或暂时关闭系统代理 / TUN 模式，然后刷新本页。</div></div>'; }
+}
 function fetchTree(){
   if(busy) return; busy=true;
   var x=new XMLHttpRequest();
   x.open('GET','/tree?path='+encodeURIComponent(curPath),true);
+  x.timeout=4000;
   x.onreadystatechange=function(){
     if(x.readyState===4){ busy=false;
-      if(x.status===200){ try{ var j=JSON.parse(x.responseText); cache[curPath]=j.node; render(); }catch(e){} } }
+      if(x.status===200){ fails=0;
+        var w=document.getElementById('wait'); if(w.innerHTML!==waitHtml){ w.innerHTML=waitHtml; }
+        try{ var j=JSON.parse(x.responseText); cache[curPath]=j.node; render(); }catch(e){} }
+      else { netFail(); } }
   };
+  x.onerror=netFail; x.ontimeout=netFail;
   x.send(null);
 }
 function navigate(path,isChild){
@@ -428,7 +449,12 @@ fetchTree(); setInterval(fetchTree,600);
     $enc = [System.Text.Encoding]::UTF8
 
     $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)
-    $listener.Start()
+    try { $listener.Start() }
+    catch {
+        Write-Host ('[serve] FATAL: cannot listen on port ' + $Port + ' - ' + $_.Exception.Message)
+        Write-Host ('[serve] 多半是已有一个实例在跑：直接开 http://127.0.0.1:' + $Port + '/ 即可；或用 -Port 换端口。')
+        exit 1
+    }
     $url = 'http://127.0.0.1:' + $Port + '/'
     Write-Host ('[serve] live map running at ' + $url + '  (Ctrl+C to stop)')
     Write-Host ('[serve] scanning root: ' + $Root + ' (depth ' + $state.depth + ', prune < ' + $MinMB + ' MB)')
@@ -500,6 +526,10 @@ fetchTree(); setInterval(fetchTree,600);
             finally { $client.Close() }
         }
         catch {
+            if ($_.Exception.Message -like '*Not listening*') {
+                Write-Host '[serve] FATAL: listener dead, exiting.'
+                break
+            }
             Write-Host ('[serve] request error: ' + $_.Exception.Message)
         }
     }
@@ -527,7 +557,7 @@ $html = @'
 <meta charset="utf-8">
 <title>c-reloc map</title>
 <style>
-  html,body{margin:0;height:100%;font:13px/1.4 "Segoe UI",system-ui,sans-serif;background:#111;color:#ddd}
+  html,body{margin:0;height:100%;font:13px/1.4 "Segoe UI",system-ui,sans-serif;background:#111;color:#ddd;overflow:hidden}
   #bar{padding:6px 10px;background:#1b1b1b;border-bottom:1px solid #333;white-space:nowrap;overflow-x:auto}
   #bar b{color:#8fd3ff}
   #bar span.crumb{cursor:pointer;color:#8fd3ff}
@@ -583,7 +613,13 @@ function render(){
   var map=document.getElementById('map'),W=map.clientWidth,H=map.clientHeight;
   map.innerHTML='';
   var items=cur.c.slice().sort(function(a,b){return b.s-a.s;});
-  var out=[];squarify(items,0,0,W,H,out);
+  var out=[];
+  if(items.length&&W>1&&H>1){
+    var tot=0;for(var q=0;q<items.length;q++)tot+=items[q].s;
+    if(tot>0){var k=(W*H)/tot;
+      var px=items.map(function(it){return {n:it.n,s:it.s*k,raw:it.s,c:it.c};});
+      squarify(px,0,0,W,H,out);}
+  }
   var depth=stack.length;
   for(var i=0;i<out.length;i++){
     var c=out[i],d=document.createElement('div');
@@ -591,12 +627,12 @@ function render(){
     d.style.left=c.x+'px';d.style.top=c.y+'px';d.style.width=Math.max(0,c.w-2)+'px';d.style.height=Math.max(0,c.h-2)+'px';
     d.style.background=color(depth+i);
     if(c.w>50&&c.h>16){var l=document.createElement('div');l.className='lbl';
-      l.textContent=c.n.n+'  '+fmt(c.n.s);
+      l.textContent=c.n.n+'  '+fmt(c.n.raw);
       l.style.fontSize=(c.w>200&&c.h>60)?'14px':'11px';
       d.appendChild(l);}
     d.onmousemove=(function(n){return function(ev){var t=document.getElementById('tip');
       t.style.display='block';t.style.left=(ev.clientX+14)+'px';t.style.top=(ev.clientY+14)+'px';
-      t.textContent=n.n+'  =  '+fmt(n.s);};})(c.n);
+      t.textContent=n.n+'  =  '+fmt(n.raw);};})(c.n);
     d.onmouseleave=function(){document.getElementById('tip').style.display='none';};
     d.onclick=(function(n){return function(ev){ev.stopPropagation();
       if(n.c&&n.c.length){stack.push(cur);cur=n;render();drawBar();}};})(c.n);
