@@ -406,6 +406,24 @@
       "notes": "XDG 缓存约定目录，工具按普通存储对待（重建也无妨）；puppeteer 另有 PUPPETEER_CACHE_DIR 可走 config，树内若现嵌套链接用 -KeepLinks。"
     },
     {
+      "id": "cuda-toolkit",
+      "name": "CUDA Toolkit（Program Files\\NVIDIA GPU Computing Toolkit 整目录）",
+      "mechanism": "junction",
+      "detect": {
+        "paths": ["C:\\Program Files\\NVIDIA GPU Computing Toolkit"],
+        "processes": ["Code*", "node*", "nvcc*", "cl*"]
+      },
+      "data": {
+        "mode": "junction",
+        "targets": {
+          "C:\\Program Files\\NVIDIA GPU Computing Toolkit": "{reloc}\\cuda-toolkit"
+        }
+      },
+      "verify": ["经 junction 路径运行 nvcc --version"],
+      "risk": "medium",
+      "notes": "官方安装器不给选路径（驱动组件除外），junction 是正解。Program Files 下迁移/删除备份需管理员（UAC 助手脚本）；迁移后经 junction 运行 nvcc --version 验证。注意 VS Code 的 CUDA 扩展子进程会把 CWD 设进 toolkit 目录锁死改名，迁移前必须完全退出 VS Code；若完整编译报缺 corecrt.h 是机器没装 Windows SDK，与迁移无关。"
+    },
+    {
       "id": "electron-updaters",
       "name": "Electron 应用更新器下载缓存群（Local\\*-updater，约30个目录）",
       "mechanism": "junction",
