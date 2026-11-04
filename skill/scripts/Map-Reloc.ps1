@@ -1,12 +1,16 @@
 # =====================================================================
-# Map-Reloc.ps1 - c-relocator disk-usage mapper (SpaceSniffer-like).
-# Walks a root, builds a size tree, and renders a self-contained
-# interactive HTML treemap (inline JS, no external dependencies).
-# Read-only. PowerShell 5.1+.
-#   Map-Reloc.ps1 -Root C:\ -Depth 4 -MinMB 50
-#   Map-Reloc.ps1 -Root E:\Reloc -Depth 6 -MinMB 1 -Out map.html
-# Prunes deny-listed system dirs by default (migration tool POV);
-# -NoPruneDeny shows everything. Reparse points are never followed.
+# Map-Reloc.ps1 - c-relocator disk-usage mapper.
+#
+# Two modes:
+#   1) Static export (original): walk + write a self-contained HTML treemap.
+#        Map-Reloc.ps1 -Root C:\ -Depth 4 -MinMB 50 -Out map.html
+#   2) Live server (-Serve): starts a localhost HTTP server with a
+#      SpaceSniffer-style live viewer - blocks grow in real time while the
+#      scan runs, click any directory to lazily scan/drill into it.
+#        Map-Reloc.ps1 -Serve -Root C:\ -Port 8734
+#      Stop with Ctrl+C.
+# Both modes: read-only, links never followed, deny-list pruning by default
+# (disable pruning with -NoPruneDeny). PowerShell 5.1+.
 # =====================================================================
 [CmdletBinding()]
 param(
@@ -15,7 +19,10 @@ param(
     [double]$MinMB = 50,
     [string]$Out = '',
     [switch]$NoPruneDeny,
-    [string]$Rules = ''
+    [string]$Rules = '',
+    [switch]$Serve,
+    [int]$Port = 8734,
+    [int]$ServeDepth = 3
 )
 
 $ErrorActionPreference = 'Continue'
@@ -58,16 +65,13 @@ function New-Node([string]$name) {
     return @{ n = $name; s = [long]0; c = @( ) }
 }
 
-# Recursive walk: always sums full subtree bytes; tree nodes are only
-# kept while depth budget remains. Files become leaf nodes when large.
 function Get-Tree([string]$path, [int]$depthLeft) {
     $node = New-Node (Split-Path -Leaf $path)
     $children = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue)
     foreach ($item in $children) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
         if ($item.PSIsContainer) {
-            if ((Test-UnderDenyPrefix $item.FullName)) { continue }
-            $size = [long]0
+            if (Test-UnderDenyPrefix $item.FullName) { continue }
             if ($depthLeft -gt 0) {
                 $child = Get-Tree $item.FullName ($depthLeft - 1)
                 $node.s += $child.s
@@ -77,11 +81,10 @@ function Get-Tree([string]$path, [int]$depthLeft) {
                 $sum = (Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
                     Measure-Object -Property Length -Sum).Sum
                 if ($null -eq $sum) { $sum = 0 }
-                $size = [long]$sum
-                $node.s += $size
-                if ($size -ge $minBytes) {
+                $node.s += [long]$sum
+                if ([long]$sum -ge $minBytes) {
                     $leaf = New-Node $item.Name
-                    $leaf.s = $size
+                    $leaf.s = [long]$sum
                     $node.c += ,$leaf
                 }
             }
@@ -105,10 +108,345 @@ function Prune-Tree($node) {
         Prune-Tree $k
         if ([long]$k.s -ge $minBytes) { $kept += ,$k }
     }
-    $sorted = @($kept | Sort-Object { [long]$_.s } -Descending)
-    $node.c = $sorted
+    $node.c = @($kept | Sort-Object { [long]$_.s } -Descending)
 }
 
+# =====================================================================
+# Live server mode
+# =====================================================================
+if ($Serve) {
+
+    $state = [hashtable]::Synchronized(@{})
+    $state.lock = New-Object object
+    $state.trees = @{}                                    # lower(path) -> shared node
+    $state.queue = New-Object System.Collections.Queue    # scan jobs
+    $state.deny = $denyPrefixes
+    $state.minBytes = $minBytes
+    $state.depth = $ServeDepth
+    $state.rootPath = $Root
+
+    $workerScript = {
+        param($state)
+        function UnderDeny([string]$p) {
+            if ($state.deny.Count -eq 0) { return $false }
+            $n = $p.TrimEnd('\').ToLowerInvariant()
+            foreach ($d in $state.deny) { if ($n -eq $d -or $n.StartsWith($d + '\')) { return $true } }
+            return $false
+        }
+        function ScanInto($node, $path, $depthLeft) {
+            $fileBytes = [long]0
+            $bigFiles = New-Object System.Collections.ArrayList
+            $children = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue)
+            foreach ($it in $children) {
+                if (($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                if ($it.PSIsContainer) {
+                    if (UnderDeny $it.FullName) { continue }
+                    if ($depthLeft -gt 0) {
+                        $cn = @{ n = $it.Name; s = [long]0; done = $false; c = (New-Object System.Collections.ArrayList) }
+                        ScanInto $cn $it.FullName ($depthLeft - 1)
+                        [System.Threading.Monitor]::Enter($state.lock)
+                        try { $null = $node.c.Add($cn); $node.s += [long]$cn.s } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                    }
+                    else {
+                        $sum = [long]0
+                        Get-ChildItem -LiteralPath $it.FullName -Recurse -File -Force -ErrorAction SilentlyContinue |
+                            ForEach-Object { $sum += [long]$_.Length }
+                        if ($sum -ge $state.minBytes) {
+                            $ln = @{ n = $it.Name; s = $sum; done = $true; c = (New-Object System.Collections.ArrayList) }
+                            [System.Threading.Monitor]::Enter($state.lock)
+                            try { $null = $node.c.Add($ln); $node.s += $sum } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                        }
+                        else {
+                            $fileBytes += $sum
+                        }
+                    }
+                }
+                else {
+                    $fileBytes += [long]$it.Length
+                    if ([long]$it.Length -ge $state.minBytes -and $bigFiles.Count -lt 200) {
+                        $ln = @{ n = $it.Name; s = [long]$it.Length; done = $true; c = (New-Object System.Collections.ArrayList) }
+                        [System.Threading.Monitor]::Enter($state.lock)
+                        try { $null = $bigFiles.Add($ln) } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                    }
+                }
+            }
+            [System.Threading.Monitor]::Enter($state.lock)
+            try {
+                $node.s += $fileBytes
+                foreach ($b in $bigFiles) { $null = $node.c.Add($b); $node.s += [long]$b.s }
+                $sorted = New-Object System.Collections.ArrayList
+                foreach ($x in ($node.c | Sort-Object { [long]$_.s } -Descending)) { $null = $sorted.Add($x) }
+                $node.c = $sorted
+            } finally { [System.Threading.Monitor]::Exit($state.lock) }
+        }
+        while ($true) {
+            $job = $null
+            [System.Threading.Monitor]::Enter($state.queue.SyncRoot)
+            try { if ($state.queue.Count -gt 0) { $job = $state.queue.Dequeue() } } finally { [System.Threading.Monitor]::Exit($state.queue.SyncRoot) }
+            if ($null -eq $job) { Start-Sleep -Milliseconds 250; continue }
+            $key = $job.path.TrimEnd('\').ToLowerInvariant()
+            [System.Threading.Monitor]::Enter($state.lock)
+            try {
+                $node = $state.trees[$key]
+                if ($null -eq $node -or $node.done) { continue }
+                $node.s = [long]0
+                $node.c = (New-Object System.Collections.ArrayList)
+            } finally { [System.Threading.Monitor]::Exit($state.lock) }
+            ScanInto $node $job.path $job.depth
+            [System.Threading.Monitor]::Enter($state.lock)
+            try { $node.done = $true } finally { [System.Threading.Monitor]::Exit($state.lock) }
+        }
+    }
+    $worker = [powershell]::Create()
+    $worker.AddScript($workerScript) | Out-Null
+    $worker.AddArgument($state) | Out-Null
+    $worker.BeginInvoke() | Out-Null
+
+    function EscJson([string]$s) {
+        $s = $s.Replace('\', '\\').Replace('"', '\"')
+        $s = $s.Replace("`r", '\r').Replace("`n", '\n').Replace("`t", '\t')
+        return $s
+    }
+    function EmitNode($node) {
+        $sb = '{"n":"' + (EscJson $node.n) + '","s":' + [long]$node.s + ',"done":'
+        if ($node.done) { $sb += 'true' } else { $sb += 'false' }
+        $sb += ',"p":"' + (EscJson $node.path) + '","c":['
+        $first = $true
+        foreach ($ch in $node.c) {
+            if (-not $first) { $sb += ',' }
+            $sb += EmitNode $ch
+            $first = $false
+        }
+        $sb += ']}'
+        return $sb
+    }
+    function GetOrStart([string]$path) {
+        $key = $path.TrimEnd('\').ToLowerInvariant()
+        [System.Threading.Monitor]::Enter($state.lock)
+        try {
+            $node = $state.trees[$key]
+            if ($null -eq $node) {
+                $node = @{ n = (Split-Path -Leaf $path); s = [long]0; done = $false; c = (New-Object System.Collections.ArrayList); path = $path.TrimEnd('\') }
+                $state.trees[$key] = $node
+                $state.queue.Enqueue(@{ path = $path; depth = $state.depth })
+            }
+        } finally { [System.Threading.Monitor]::Exit($state.lock) }
+        return $node
+    }
+
+    $viewerHtml = @'
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>c-reloc live map</title>
+<style>
+  html,body{margin:0;height:100%;font:13px/1.4 "Segoe UI",system-ui,sans-serif;background:#141414;color:#ddd;overflow:hidden}
+  #bar{position:absolute;top:0;left:0;right:0;height:30px;background:#1d1d1d;border-bottom:1px solid #333;
+       line-height:30px;padding:0 10px;white-space:nowrap;overflow-x:auto;overflow-y:hidden}
+  #bar .crumb{color:#7fc7ff;cursor:pointer}
+  #bar .crumb:hover{text-decoration:underline}
+  #bar b{color:#fff}
+  #map{position:absolute;top:30px;left:0;right:0;bottom:30px}
+  .cell{position:absolute;box-sizing:border-box;border:1px solid #141414;cursor:pointer;
+        transition:left .35s cubic-bezier(.2,.7,.3,1),top .35s cubic-bezier(.2,.7,.3,1),
+                   width .35s cubic-bezier(.2,.7,.3,1),height .35s cubic-bezier(.2,.7,.3,1),opacity .4s}
+  .cell.new{opacity:0}
+  .cell .lbl{position:absolute;left:4px;top:2px;right:4px;pointer-events:none;
+             text-shadow:0 1px 3px #000;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .cell.big .lbl{font-size:15px;font-weight:600}
+  .cell .badge{position:absolute;right:4px;top:2px;color:#ffd479;font-size:10px;pointer-events:none}
+  #tip{position:fixed;display:none;background:#000d;border:1px solid #555;border-radius:4px;
+       padding:5px 9px;pointer-events:none;z-index:9;max-width:520px;font-size:12px}
+  #foot{position:absolute;bottom:0;left:0;right:0;height:30px;line-height:30px;background:#1d1d1d;
+        border-top:1px solid #333;padding:0 10px;color:#999;font-size:12px;white-space:nowrap;overflow:hidden}
+  #foot b{color:#ffd479}
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<div id="map"></div>
+<div id="tip"></div>
+<div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span></div>
+<script>
+var ROOT = __ROOT__;
+var curPath = ROOT, stack = [], cache = {}, divs = {}, pollTimer = null, busy = false;
+var map = document.getElementById('map');
+
+function fmt(b){ if(b>=1073741824) return (b/1073741824).toFixed(2)+' GB';
+  if(b>=1048576) return (b/1048576).toFixed(1)+' MB';
+  if(b>=1024) return (b/1024).toFixed(0)+' KB'; return b+' B'; }
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function colors(d){ var b=[[52,110,166],[64,138,116],[140,108,150],[164,124,68],[68,124,164],[128,150,66],[150,90,96]];
+  var c=b[d%b.length]; return 'rgb('+c[0]+','+c[1]+','+c[2]+')'; }
+function worst(row,len){ if(!row.length) return Infinity;
+  var s=0,mx=0,mn=Infinity;
+  for(var i=0;i<row.length;i++){s+=row[i].s; if(row[i].s>mx)mx=row[i].s; if(row[i].s<mn)mn=row[i].s;}
+  if(mn<=0||s<=0) return Infinity;
+  var l=len*len, s2=s*s;
+  return Math.max(l*mx/s2, s2/(l*mn)); }
+function layoutRow(row,x,y,w,h,out){
+  var s=0; for(var i=0;i<row.length;i++) s+=row[i].s;
+  if(w>=h){ var rw=s/h, ry=y;
+    for(var j=0;j<row.length;j++){ var rh=row[j].s/rw; out.push({n:row[j],x:x,y:ry,w:rw,h:rh}); ry+=rh; }
+    return {x:x+rw,y:y};
+  } else { var rh=s/w, xx=x;
+    for(var j2=0;j2<row.length;j2++){ var rw2=row[j2].s/rh; out.push({n:row[j2],x:xx,y:y,w:rw2,h:rh}); xx+=rw2; }
+    return {x:x,y:y+rh};
+  } }
+function squarify(items,x,y,w,h,out){
+  var row=[],i=0;
+  while(i<items.length&&w>1&&h>1){
+    var len=Math.min(w,h);
+    var c1=worst(row,len), c2=worst(row.concat([items[i]]),len);
+    if(c1===Infinity||c2<=c1){ row.push(items[i]); i++; }
+    else { var r=layoutRow(row,x,y,w,h,out);
+      if(w>=h){ w-=(r.x-x); x=r.x; } else { h-=(r.y-y); y=r.y; }
+      row=[]; }
+  }
+  if(row.length&&w>1&&h>1) layoutRow(row,x,y,w,h,out);
+}
+function render(){
+  var node = cache[curPath]; if(!node) return;
+  var W = map.clientWidth, H = map.clientHeight;
+  var items = (node.c||[]).slice().sort(function(a,b){return b.s-a.s;});
+  var out = []; squarify(items,0,0,W,H,out);
+  var seen = {}, depth = stack.length;
+  for(var i=0;i<out.length;i++){
+    var o=out[i], k=curPath.toLowerCase()+'|'+o.n.n, d=divs[k];
+    if(!d){
+      d=document.createElement('div'); d.className='cell new';
+      d.dataset.k=k; map.appendChild(d); divs[k]=d;
+      setTimeout(function(el){ el.className='cell'; }, 30);
+      var l=document.createElement('div'); l.className='lbl'; d.appendChild(l);
+      var b=document.createElement('div'); b.className='badge'; d.appendChild(b);
+      d.onmousemove=(function(name,size,done){ return function(ev){
+        var t=document.getElementById('tip'); t.style.display='block';
+        t.style.left=(ev.clientX+14)+'px'; t.style.top=(ev.clientY+14)+'px';
+        t.innerHTML=esc(name)+' = <b>'+fmt(size)+'</b>'+(done?'':'<br><span style="color:#ffd479">counting...</span>'); };
+      })(o.n.n,o.n.s,o.n.done);
+      d.onmouseleave=function(){ document.getElementById('tip').style.display='none'; };
+    }
+    d.style.left=o.x+'px'; d.style.top=o.y+'px';
+    d.style.width=Math.max(0,o.w-2)+'px'; d.style.height=Math.max(0,o.h-2)+'px';
+    d.style.background=colors(depth+i);
+    var lbl=d.querySelector('.lbl');
+    lbl.textContent=o.n.n+'  '+fmt(o.n.s);
+    lbl.style.fontSize=(o.w>180&&o.h>50)?'14px':'11px';
+    d.querySelector('.badge').textContent=o.n.done?'':'...';
+    seen[k]=1;
+  }
+  for(var key in divs){ if(!seen[key]){ var old=divs[key]; old.style.opacity='0';
+    (function(el){ setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); },450); })(old);
+    delete divs[key]; } }
+  drawBar(node);
+}
+function drawBar(node){
+  var b=document.getElementById('bar'); b.innerHTML='';
+  function mk(label,p){ var s=document.createElement('span'); s.className='crumb'; s.textContent=label;
+    s.onclick=(function(pp){ return function(){ navigate(pp,false); }; })(p); b.appendChild(s); }
+  mk('[root]',ROOT);
+  var acc=ROOT;
+  for(var i=0;i<stack.length;i++){ acc=stack[i].path;
+    b.appendChild(document.createTextNode(' \\ ')); mk(stack[i].name,acc); }
+  b.appendChild(document.createTextNode(' \\ '));
+  var cb=document.createElement('b'); cb.textContent=node.n+' = '+fmt(node.s); b.appendChild(cb);
+  document.getElementById('cur').textContent=curPath;
+  document.getElementById('stat').innerHTML=node.done?
+    '<b>done</b> - click any block to drill in':'<b>counting...</b> blocks grow live';
+}
+function fetchTree(){
+  if(busy) return; busy=true;
+  var x=new XMLHttpRequest();
+  x.open('GET','/tree?path='+encodeURIComponent(curPath),true);
+  x.onreadystatechange=function(){
+    if(x.readyState===4){ busy=false;
+      if(x.status===200){ try{ var j=JSON.parse(x.responseText); cache[curPath]=j.node; render(); }catch(e){} } }
+  };
+  x.send(null);
+}
+function navigate(path,isChild){
+  if(isChild!==false){ stack.push({name:cache[curPath].n,path:curPath}); }
+  curPath=path; divs={}; map.innerHTML=''; fetchTree();
+}
+map.onclick=function(){ if(stack.length){ var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } };
+window.onresize=function(){ render(); };
+document.onkeydown=function(e){ if(e.key==='Backspace'&&stack.length){ e.preventDefault(); var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } };
+fetchTree(); pollTimer=setInterval(fetchTree,600);
+</script>
+</body>
+</html>
+'@
+
+    $viewerHtml = $viewerHtml.Replace('__ROOT__', (EscJson $Root))
+    $enc = [System.Text.Encoding]::UTF8
+
+    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)
+    $listener.Start()
+    $url = 'http://127.0.0.1:' + $Port + '/'
+    Write-Host ('[serve] live map running at ' + $url + '  (Ctrl+C to stop)')
+    Write-Host ('[serve] scanning root: ' + $Root + ' (depth ' + $state.depth + ', prune < ' + $MinMB + ' MB)')
+    try { Start-Process $url | Out-Null } catch { }
+
+    # seed root scan
+    GetOrStart $Root | Out-Null
+
+    while ($true) {
+        try {
+            if (-not $listener.Pending()) { Start-Sleep -Milliseconds 120; continue }
+            $client = $listener.AcceptTcpClient()
+            try {
+                $stream = $client.GetStream()
+                $stream.ReadTimeout = 5000
+                $buf = New-Object byte[] 32768
+                $read = $stream.Read($buf, 0, $buf.Length)
+                if ($read -le 0) { continue }
+                $req = [System.Text.Encoding]::ASCII.GetString($buf, 0, $read)
+                $line = ($req -split "`r`n")[0]
+                $parts = $line -split ' '
+                if ($parts.Count -lt 2) { $client.Close(); continue }
+                $target = $parts[1]
+
+                if ($target -eq '/' -or $target -eq '/index.html') {
+                    $bytes = $enc.GetBytes($viewerHtml)
+                    $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: " + $bytes.Length + "`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n")
+                    $stream.Write($head, 0, $head.Length); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
+                }
+                elseif ($target.StartsWith('/tree?')) {
+                    $pathVal = ''
+                    foreach ($kv in ($target.Substring(6) -split '&')) {
+                        $i = $kv.IndexOf('=')
+                        if ($i -gt 0 -and $kv.Substring(0, $i) -eq 'path') {
+                            $pathVal = [System.Uri]::UnescapeDataString($kv.Substring($i + 1)).TrimEnd('\')
+                        }
+                    }
+                    $body = '{"error":"bad path"}'
+                    if ($pathVal -and (Test-Path -LiteralPath $pathVal)) {
+                        $node = GetOrStart $pathVal
+                        [System.Threading.Monitor]::Enter($state.lock)
+                        try { $body = '{"node":' + (EmitNode $node) + '}' } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                    }
+                    $bytes = $enc.GetBytes($body)
+                    $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: " + $bytes.Length + "`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n")
+                    $stream.Write($head, 0, $head.Length); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
+                }
+                else {
+                    $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 404 Not Found`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+                    $stream.Write($head, 0, $head.Length); $stream.Flush()
+                }
+            }
+            finally { $client.Close() }
+        }
+        catch {
+            Write-Host ('[serve] request error: ' + $_.Exception.Message)
+        }
+    }
+    exit 0
+}
+
+# =====================================================================
+# Static export mode
+# =====================================================================
 Write-Host ('[map] walking ' + $Root + ' (depth ' + $Depth + ', prune < ' + $MinMB + ' MB)...')
 $tree = Get-Tree $Root ($Depth)
 Prune-Tree $tree
@@ -150,49 +488,53 @@ var cur = DATA, stack = [];
 function fmt(b){ if(b>=1073741824) return (b/1073741824).toFixed(2)+' GB';
   if(b>=1048576) return (b/1048576).toFixed(1)+' MB';
   if(b>=1024) return (b/1024).toFixed(0)+' KB'; return b+' B'; }
-function pad2(n){return n<10?'0'+n:n;}
 function color(d){var base=[[46,104,158],[59,130,111],[133,102,144],[157,119,64],[64,119,157],[121,144,62]];
   var c=base[d%base.length];return 'rgb('+c[0]+','+c[1]+','+c[2]+')';}
+function worst(row,len){ if(!row.length) return Infinity;
+  var s=0,mx=0,mn=Infinity;
+  for(var i=0;i<row.length;i++){s+=row[i].s;if(row[i].s>mx)mx=row[i].s;if(row[i].s<mn)mn=row[i].s;}
+  if(mn<=0||s<=0) return Infinity;
+  var l=len*len,s2=s*s;
+  return Math.max(l*mx/s2, s2/(l*mn)); }
+function layoutRow(row,x,y,w,h,out){
+  var s=0;for(var i=0;i<row.length;i++)s+=row[i].s;
+  if(w>=h){var rw=s/h,ry=y;
+    for(var j=0;j<row.length;j++){var rh=row[j].s/rw;out.push({n:row[j],x:x,y:ry,w:rw,h:rh});ry+=rh;}
+    return {x:x+rw,y:y};
+  }else{var rh=s/w,xx=x;
+    for(var j2=0;j2<row.length;j2++){var rw2=row[j2].s/rh;out.push({n:row[j2],x:xx,y:y,w:rw2,h:rh});xx+=rw2;}
+    return {x:x,y:y+rh};
+  }}
 function squarify(items,x,y,w,h,out){
-  if(!items.length||w<=0||h<=0)return;
-  var total=0;for(var i=0;i<items.length;i++)total+=items[i].s;
-  var vert=w>=h, fw=vert?h:w, fx=fy=0, rem=total, row=[], rowSum=0;
-  function place(){ var rw=rowSum*fw/rem; var ox=x,oy=y;
-    for(var i=0;i<row.length;i++){ var rh=row[i].s/rw; var cw,ch;
-      if(vert){cw=rw;ch=rh;}else{cw=rh;ch=rw;}
-      out.push({n:row[i],x:ox,y:oy,w:cw,h:ch});
-      if(vert)oy+=ch;else ox+=cw; }
-    if(vert)x+=rw;else y+=rw;
-    if(vert)w-=rw;else h-=rw; fw=vert?h:w; rem-=rowSum; row=[];rowSum=0; }
-  for(var j=0;j<items.length;j++){
-    var it=items[j]; var ratio=rowSum?Math.max((fw*fw*rowSum)/ (rowSum*rowSum), (rowSum*rowSum)/(fw*fw*rowSum)):0;
-    var nr=rowSum+it.s; var r1=(fw*fw*nr)/(nr*nr*1.0);
-    if(!row.length||r1<=ratio+1e-9||ratio===0){row.push(it);rowSum+=it.s;}
-    else{place();j--;}
-    if(fw<=0)break;
+  var row=[],i=0;
+  while(i<items.length&&w>1&&h>1){
+    var len=Math.min(w,h);
+    var c1=worst(row,len),c2=worst(row.concat([items[i]]),len);
+    if(c1===Infinity||c2<=c1){row.push(items[i]);i++;}
+    else{var r=layoutRow(row,x,y,w,h,out);
+      if(w>=h){w-=(r.x-x);x=r.x;}else{h-=(r.y-y);y=r.y;}
+      row=[];}
   }
-  if(row.length)place();
+  if(row.length&&w>1&&h>1)layoutRow(row,x,y,w,h,out);
 }
 function render(){
   var map=document.getElementById('map'),W=map.clientWidth,H=map.clientHeight;
   map.innerHTML='';
-  var out=[];squarify(cur.c.slice(),0,0,W,H,out);
+  var items=cur.c.slice().sort(function(a,b){return b.s-a.s;});
+  var out=[];squarify(items,0,0,W,H,out);
   var depth=stack.length;
   for(var i=0;i<out.length;i++){
     var c=out[i],d=document.createElement('div');
     d.className='cell';
     d.style.left=c.x+'px';d.style.top=c.y+'px';d.style.width=Math.max(0,c.w-2)+'px';d.style.height=Math.max(0,c.h-2)+'px';
-    var lum=0.25+0.5*Math.min(1,c.n.s/(cur.s||1)*8);
     d.style.background=color(depth+i);
-    d.style.opacity=lum+0.35;
-    var showName=c.w>50&&c.h>16;
-    if(showName){var l=document.createElement('div');l.className='lbl';
+    if(c.w>50&&c.h>16){var l=document.createElement('div');l.className='lbl';
       l.textContent=c.n.n+'  '+fmt(c.n.s);
       l.style.fontSize=(c.w>200&&c.h>60)?'14px':'11px';
       d.appendChild(l);}
-    d.onmousemove=function(ev,n){var t=document.getElementById('tip');
+    d.onmousemove=(function(n){return function(ev){var t=document.getElementById('tip');
       t.style.display='block';t.style.left=(ev.clientX+14)+'px';t.style.top=(ev.clientY+14)+'px';
-      t.textContent=n.n+'  =  '+fmt(n.s)+(n.c&&n.c.length?('  ('+n.c.length+' children)'):'');};
+      t.textContent=n.n+'  =  '+fmt(n.s);};})(c.n);
     d.onmouseleave=function(){document.getElementById('tip').style.display='none';};
     d.onclick=(function(n){return function(ev){ev.stopPropagation();
       if(n.c&&n.c.length){stack.push(cur);cur=n;render();drawBar();}};})(c.n);

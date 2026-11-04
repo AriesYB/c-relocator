@@ -82,9 +82,13 @@ manifest 不存在时先初始化：
 1. `Scan-Reloc.ps1 -Rules <rules.json> -Manifest <manifest> -TopDirs -Top 30` — 对 `%LOCALAPPDATA%`、
    `%APPDATA%`、`%USERPROFILE%` 做子目录体积排行（含文件数 / .exe 数 / 最近写入；deny 目录与
    链接自动剪枝）。大目录较慢时可先 `-SkipSizes` 看清单再挑着量。按体积从大到小逐个处理。
-   全盘视角（SpaceSniffer 式）用 `Map-Reloc.ps1 -Root C:\ -Depth 4 -MinMB 50 -Rules <rules.json>`，
-   生成自包含交互式 HTML treemap（点击下钻、面包屑回退），适合定位规则库视角之外的大块头
-   （如 `Program Files`、`ProgramData` 下的工具链）。`-NoPruneDeny` 可连系统目录一起看（纯分析）。
+   全盘视角（SpaceSniffer 式，两种）：
+   - **实时动态**（推荐）：`Map-Reloc.ps1 -Serve -Root C:\ -Port 8734 -Rules <rules.json>` —— 启动本地
+     服务并自动打开浏览器，方块随扫描进度实时生长（每 600ms 刷新），点击任意目录按需下钻扫描，
+     面包屑回退，Backspace 返回上级。Ctrl+C 停止。
+   - **静态导出**：`Map-Reloc.ps1 -Root C:\ -Depth 4 -MinMB 50 -Out map.html -Rules <rules.json>` ——
+     扫完后生成自包含交互式 HTML treemap。
+   两种模式均剪枝 deny 目录（`-NoPruneDeny` 连系统目录一起看），永不跟随链接。
 2. 对每个大目录做**归属识别**（手段从强到弱）：
    - 名字即线索：`%LOCALAPPDATA%\<App>`、`%LOCALAPPDATA%\Programs\<App>` 多为厂商/产品名；
    - 目录内找标记：`.exe` 的产品属性、settings/config 文件、package 标识、日志内容；
