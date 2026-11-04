@@ -9,9 +9,9 @@
       "name": "c-relocator",
       "source": "./skill",
       "description": "C盘重定向与数据迁移（C盘瘦身治本方案）：官方配置重定向 + junction 兜底，manifest 台账可撤销可重建，含 SpaceSniffer 式全盘分析。Move npm/pip/Gradle/JetBrains/CUDA caches off C: with config redirect or NTFS junctions, fully undoable.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "productivity",
-      "keywords": ["windows", "disk-space", "junction", "mklink", "migration", "cleanup", "cuda", "npm", "jetbrains"]
+      "keywords": ["windows", "disk-space", "junction", "mklink", "migration", "cleanup", "cuda", "npm", "jetbrains", "treemap", "disk-usage", "space-analyzer", "live-map"]
     }
   ]
 }

@@ -21,7 +21,10 @@ write to `C:` by default. Cleaner apps only delete the mess; **c-relocator moves
 - **Safety model**: a hard deny-list (script + rules double line), one audited entry point for all
   moves (copy-then-rename, auto-rollback, sentinel verification), and deletion of backups is the only
   irreversible step — explicit user consent + forced re-verification.
-- **Disk mapping**: `Map-Reloc` renders a SpaceSniffer-style interactive HTML treemap of any volume.
+- **Live disk mapping**: `Map-Reloc` streams a SpaceSniffer-style interactive treemap over SSE —
+  blocks grow while scanning, click to expand in place, double-click to enter, right-click menu
+  (open in Explorer / copy full path), sort hysteresis so tiles never jitter, slivers auto-fold
+  into an aggregate bar, gray = file / colored = directory, animated stripes = still scanning.
 
 ## Install
 
@@ -88,7 +91,7 @@ skill/
 ├── rules.json      # rule library — pure data, extend freely
 └── scripts/
     ├── Scan-Reloc.ps1   # read-only audit scanner (rules + TopDirs)
-    ├── Map-Reloc.ps1    # SpaceSniffer-style HTML treemap
+    ├── Map-Reloc.ps1    # live SSE treemap (SpaceSniffer-style interactions)
     ├── Move-Reloc.ps1   # THE migration entrypoint (junction/copy, -KeepLinks, -ResumeFromCopy)
     └── Undo-Reloc.ps1   # undo / rebuild / confirm-delete (-AllowLinkTree)
 DESIGN.md           # design doc: architecture, safety model, field lessons (zh)
