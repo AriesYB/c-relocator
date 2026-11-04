@@ -418,7 +418,7 @@ function paintCell(d,o,x,y,w,h,pth,kk,seen,ci){
   d.__n=o.n; d.__path=pth;
   d.style.left=x+'px'; d.style.top=y+'px';
   d.style.width=Math.max(0,w-2)+'px'; d.style.height=Math.max(0,h-2)+'px';
-  d.style.background=colors(ci);
+  d.style.background=o.n.f?(o.n.agg?'#3f3f46':'#6e6e6e'):colors(ci);
   d.classList.toggle('expd',!!expanded[pth]);
   var lbl=d.querySelector('.lbl');
   lbl.textContent=o.n.n+'  '+fmt(o.n.raw)+(expanded[pth]?' ▾':'');
@@ -459,7 +459,6 @@ function layoutInto(node,x0,y0,w0,h0,keyBase,seen){
     var pth=o.n.agg?keyBase:(o.n.p||(keyBase+sep+o.n.n));
     var d=getCell(kk);
     paintCell(d,o,o.x,o.y,o.w,o.h,pth,kk,seen,depth+i);
-    if(o.n.agg){ d.style.background='#3f3f46'; }
     if(!o.n.agg&&expanded[pth]&&o.n.c&&o.n.c.length){
       var sub=cache[pth]||o.n;
       layoutInto(sub,o.x+2,o.y+16,Math.max(0,o.w-4),Math.max(0,o.h-16),pth,seen);
