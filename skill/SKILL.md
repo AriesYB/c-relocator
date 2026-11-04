@@ -1,6 +1,6 @@
 ---
 name: c-relocator
-description: C 盘重定向与数据迁移（C 盘瘦身治本方案）：把 npm、pip、Gradle、cargo、Go、JetBrains 索引、HuggingFace 等从 C 盘迁到其他盘。能配置的工具改官方配置并迁移已有数据；不能配置的路径用目录联接 junction 兜底；manifest 全程台账，支持撤销（undo）、重装后重建（rebuild）、装前预占位（preplace）。当用户提到 C 盘满了 / C 盘空间不足 / C 盘瘦身、把某工具的缓存/索引/包迁到其他盘、修改 npm/pip/gradle/cargo/JetBrains/CUDA 存储位置、软件安装不让选盘符、junction/mklink、磁盘空间分析、treemap 可视化、实时查看哪些目录占空间、SpaceSniffer/WizTree 替代时使用。
+description: C 盘满了？把开发工具的数据、缓存、索引从 C 盘迁移到其他盘：能配置的走官方配置重定向（npm/pip/Gradle/JetBrains/CUDA 等），不能配置的用 NTFS junction 链接兜底；全程台账，可撤销、可重建、可预占位。内置实时 treemap 磁盘占用分析可视化，快速定位大目录大文件。用于 C 盘空间不足、C 盘瘦身、迁移工具数据、重定向存储位置、分析磁盘占用。
 license: MIT
 metadata:
   version: 0.3.1
