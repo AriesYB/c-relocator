@@ -84,8 +84,10 @@ manifest 不存在时先初始化：
    链接自动剪枝）。大目录较慢时可先 `-SkipSizes` 看清单再挑着量。按体积从大到小逐个处理。
    全盘视角（SpaceSniffer 式，两种）：
    - **实时动态**（推荐）：`Map-Reloc.ps1 -Serve -Root C:\ -Port 8734 -Rules <rules.json>` —— 启动本地
-     服务并自动打开浏览器，方块随扫描进度实时生长（每 600ms 刷新），点击任意目录按需下钻扫描，
-     面包屑回退，Backspace 返回上级。Ctrl+C 停止。
+     服务并自动打开浏览器，方块随扫描进度实时生长（每 600ms 刷新；扫描每 16MB/400 项增量刷新，
+     方块连续长大而非跳变），悬停显示完整路径与实时体积，点击任意目录按需下钻扫描，面包屑回退，
+     Backspace 返回上级，**右键方块在资源管理器中打开**（文件则定位所在文件夹并选中——走本地
+     `/open` 端点，仅 127.0.0.1 可达）。Ctrl+C 停止。
      ⚠️ ZCode 环境：后台任务（run_in_background）跑在沙箱里，沙箱对 C:\ 等盘的目录枚举会返回空
      （不报错），导致永远扫不出数据。必须用 `Start-Process powershell -ArgumentList ...` 脱离沙箱
      启动（-WindowStyle Hidden），或直接在用户自己的终端里运行。
@@ -256,3 +258,9 @@ Undo-Reloc.ps1 -Action undo|rebuild|confirm -Manifest <manifest> [-Id <id>] [-Al
   正确做法：`k=W*H/总字节`，每项 `s×k` 后再进 squarify，标签/悬浮提示仍用原始字节。
 - **服务端验证 ≠ 页面验证**：改 viewer JS 后必须用真实浏览器打开看一眼（或 `new Function(
   script文本)` 验语法），curl 只能证明服务端活着。
+- **viewer 交互一律 `addEventListener`，禁用处理器属性**（`el.onclick=`/`oncontextmenu=`/`onkeydown=`）：
+  ①agent 内置浏览器会在主世界剥离交互类处理器属性（防注入），页面表现为"点击/右键/按键全哑"
+  但 onmousemove 正常、脚本源码完整、零报错——极易误判为代码问题；监听器不受影响。
+  ②循环里 `var d` + 闭包读 `d.__n` 是经典陷阱：所有监听器共享函数级作用域的变量，全部读到
+  最后一项（点 A 目录进了 B 目录）。listener 内用 `ev.currentTarget.__n` 取当前元素数据，
+  既避开两个坑，又保证每次 render 刷新的 `d.__n` 是活数据（悬停体积实时更新）。

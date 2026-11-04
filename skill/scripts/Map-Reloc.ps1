@@ -161,10 +161,13 @@ if ($Serve) {
             return [long]$s
         }
         function ScanInto($node, $path, $depthLeft) {
-            $fileBytes = [long]0
+            # $pending = 尚未刷入 $node.s 的字节数；周期性加锁刷新，让 viewer 看到方块实时长大
+            $pending = [long]0
+            $nItems = 0
             $bigFiles = New-Object System.Collections.ArrayList
             $children = @(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue)
             foreach ($it in $children) {
+                $nItems++
                 if (($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
                 if ($it.PSIsContainer) {
                     if (UnderDeny $it.FullName) { continue }
@@ -173,33 +176,35 @@ if ($Serve) {
                         [System.Threading.Monitor]::Enter($state.lock)
                         try { $null = $node.c.Add($cn) } finally { [System.Threading.Monitor]::Exit($state.lock) }
                         ScanInto $cn $it.FullName ($depthLeft - 1)
-                        [System.Threading.Monitor]::Enter($state.lock)
-                        try { $node.s += [long]$cn.s } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                        $pending += [long]$cn.s
                     }
                     else {
                         $sum = SumTree $it.FullName
                         if ($sum -ge $state.minBytes) {
                             $ln = @{ n = $it.Name; s = $sum; done = $true; c = (New-Object System.Collections.ArrayList); path = $it.FullName }
                             [System.Threading.Monitor]::Enter($state.lock)
-                            try { $null = $node.c.Add($ln); $node.s += $sum } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                            try { $null = $node.c.Add($ln) } finally { [System.Threading.Monitor]::Exit($state.lock) }
                         }
-                        else {
-                            $fileBytes += $sum
-                        }
+                        $pending += $sum
                     }
                 }
                 else {
-                    $fileBytes += [long]$it.Length
+                    $pending += [long]$it.Length
                     if ([long]$it.Length -ge $state.minBytes -and $bigFiles.Count -lt 200) {
-                        $ln = @{ n = $it.Name; s = [long]$it.Length; done = $true; c = (New-Object System.Collections.ArrayList) }
+                        $ln = @{ n = $it.Name; s = [long]$it.Length; done = $true; f = $true; c = (New-Object System.Collections.ArrayList) }
                         [System.Threading.Monitor]::Enter($state.lock)
                         try { $null = $bigFiles.Add($ln) } finally { [System.Threading.Monitor]::Exit($state.lock) }
                     }
                 }
+                if ($pending -ge 16MB -or ($nItems % 400) -eq 0) {
+                    [System.Threading.Monitor]::Enter($state.lock)
+                    try { $node.s += $pending } finally { [System.Threading.Monitor]::Exit($state.lock) }
+                    $pending = [long]0
+                }
             }
             [System.Threading.Monitor]::Enter($state.lock)
             try {
-                $node.s += $fileBytes
+                $node.s += $pending
                 foreach ($b in $bigFiles) { $null = $node.c.Add($b); $node.s += [long]$b.s }
                 $sorted = New-Object System.Collections.ArrayList
                 foreach ($x in ($node.c | Sort-Object { [long]$_.s } -Descending)) { $null = $sorted.Add($x) }
@@ -246,6 +251,7 @@ if ($Serve) {
         $sb = '{"n":"' + (EscJson $node.n) + '","s":' + [long]$node.s + ',"done":'
         if ($node.done) { $sb += 'true' } else { $sb += 'false' }
         if ($node.path) { $sb += ',"p":"' + (EscJson $node.path) + '"' }
+        if ($node.f) { $sb += ',"f":1' }
         $sb += ',"c":['
         $first = $true
         foreach ($ch in $node.c) {
@@ -303,17 +309,24 @@ if ($Serve) {
   #foot{position:absolute;bottom:0;left:0;right:0;height:30px;line-height:30px;background:#1d1d1d;
         border-top:1px solid #333;padding:0 10px;color:#999;font-size:12px;white-space:nowrap;overflow:hidden}
   #foot b{color:#ffd479}
+  #ctx{position:fixed;display:none;background:#232323;border:1px solid #555;border-radius:4px;
+       padding:9px 13px;z-index:10;cursor:pointer;max-width:430px;box-shadow:0 4px 14px #000c}
+  #ctx:hover{background:#2c4a66}
+  #ctxi{color:#7fc7ff;font-weight:600}
+  #ctxp{color:#999;font-size:11px;margin-top:3px;word-break:break-all}
 </style>
 </head>
 <body>
 <div id="bar"></div>
 <div id="map"></div>
 <div id="tip"></div>
+<div id="ctx"><div id="ctxi"></div><div id="ctxp"></div></div>
 <div id="wait"><div><div class="spin"></div><div style="margin-top:12px">counting directories... blocks appear as each finishes</div></div></div>
-<div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span></div>
+<div id="foot">scanning <b id="cur"></b> ... <span id="stat"></span> · 右键方块 = 在资源管理器中打开</div>
 <script>
 var ROOT = '__ROOT__';
 var curPath = ROOT, stack = [], cache = {}, divs = {}, busy = false;
+var menuPath = '', menuSel = false;
 var map = document.getElementById('map');
 
 function fmt(b){ if(b>=1073741824) return (b/1073741824).toFixed(2)+' GB';
@@ -359,7 +372,7 @@ function render(){
   var out = [];
   if(items.length&&tot>0&&W>1&&H>1){
     var k=(W*H)/tot;
-    var px=items.map(function(it){ return {n:it.n,s:it.s*k,raw:it.s,p:it.p,done:it.done,c:it.c}; });
+    var px=items.map(function(it){ return {n:it.n,s:it.s*k,raw:it.s,p:it.p,f:it.f,done:it.done,c:it.c}; });
     squarify(px,0,0,W,H,out);
   }
   var seen = {}, depth = stack.length;
@@ -371,15 +384,35 @@ function render(){
       setTimeout(function(el){ return function(){ el.className='cell'; }; }(d), 40);
       var l=document.createElement('div'); l.className='lbl'; d.appendChild(l);
       var b=document.createElement('div'); b.className='badge'; d.appendChild(b);
-      d.onmousemove=(function(n){ return function(ev){
+      d.style.cursor=o.n.f?'default':'pointer';
+      d.addEventListener('mousemove',function(ev){
+        var n=ev.currentTarget.__n||{};
         var t=document.getElementById('tip'); t.style.display='block';
-        t.style.left=(ev.clientX+14)+'px'; t.style.top=(ev.clientY+14)+'px';
-        t.innerHTML=esc(n.n)+' = <b>'+fmt(n.raw)+'</b>'+(n.done?'':'<br><span style="color:#ffd479">counting...</span>'); };
-      })(o.n);
-      d.onmouseleave=function(){ document.getElementById('tip').style.display='none'; };
-      d.onclick=(function(n){ return function(ev){ ev.stopPropagation();
-        if(n.c&&n.c.length&&n.p){ navigate(n.p); } }; })(o.n);
+        t.style.left=Math.min(ev.clientX+14,window.innerWidth-560)+'px';
+        t.style.top=(ev.clientY+14)+'px';
+        var fp=n.p||(curPath.charAt(curPath.length-1)==='\\'?curPath+n.n:curPath+'\\'+n.n);
+        t.innerHTML='<div style="color:#9fd1ff;word-break:break-all">'+esc(fp)+'</div><b>'+fmt(n.raw)+'</b>'+
+          (n.f?'<span style="color:#888"> · 文件</span>':'<span style="color:#888"> · 目录</span>')+
+          (n.done?'':'<br><span style="color:#ffd479">counting...</span>')+
+          '<br><span style="color:#888">右键：'+(n.f?'打开所在文件夹':'在资源管理器中打开')+'</span>';
+      });
+      d.addEventListener('mouseleave',function(){ document.getElementById('tip').style.display='none'; });
+      d.addEventListener('click',function(ev){ ev.stopPropagation();
+        var n=ev.currentTarget.__n||{};
+        if(!n.f&&n.c&&n.c.length&&n.p){ navigate(n.p); } });
+      d.addEventListener('contextmenu',function(ev){ ev.preventDefault(); ev.stopPropagation();
+        var n=ev.currentTarget.__n||{};
+        var fp=n.p||(curPath.charAt(curPath.length-1)==='\\'?curPath+n.n:curPath+'\\'+n.n);
+        var c=document.getElementById('ctx');
+        document.getElementById('ctxi').textContent=n.f?'打开所在文件夹（并选中）':'在资源管理器中打开';
+        document.getElementById('ctxp').textContent=fp;
+        menuPath=fp; menuSel=!!n.f;
+        c.style.display='block';
+        c.style.left=Math.min(ev.clientX,window.innerWidth-450)+'px';
+        c.style.top=Math.min(ev.clientY,window.innerHeight-90)+'px';
+      });
     }
+    d.__n=o.n;
     d.style.left=o.x+'px'; d.style.top=o.y+'px';
     d.style.width=Math.max(0,o.w-2)+'px'; d.style.height=Math.max(0,o.h-2)+'px';
     d.style.background=colors(depth+i);
@@ -417,6 +450,11 @@ function netFail(){
     '<div style="color:#bbb;line-height:1.7">浏览器代理可能拦截了 localhost 请求。<br>'+
     '请把 <b style="color:#ffd479">127.0.0.1 / localhost</b> 加入代理软件的直连(绕过)列表，<br>或暂时关闭系统代理 / TUN 模式，然后刷新本页。</div></div>'; }
 }
+function openPath(p,sel){ var x=new XMLHttpRequest();
+  x.open('GET','/open?path='+encodeURIComponent(p)+(sel?'&sel=1':''),true); x.send(null); }
+document.addEventListener('click',function(){ document.getElementById('ctx').style.display='none'; });
+document.getElementById('ctx').addEventListener('click',function(e2){ e2.stopPropagation();
+  openPath(menuPath,menuSel); document.getElementById('ctx').style.display='none'; });
 function fetchTree(){
   if(busy) return; busy=true;
   var x=new XMLHttpRequest();
@@ -436,9 +474,9 @@ function navigate(path,isChild){
   if(isChild!==false && cache[curPath]){ stack.push({name:cache[curPath].n,path:curPath}); }
   curPath=path; divs={}; map.innerHTML=''; fetchTree();
 }
-map.onclick=function(){ if(stack.length){ var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } };
-window.onresize=function(){ render(); };
-document.onkeydown=function(e){ if(e.key==='Backspace'&&stack.length){ e.preventDefault(); var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } };
+map.addEventListener('click',function(){ if(stack.length){ var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } });
+window.addEventListener('resize',function(){ render(); });
+document.addEventListener('keydown',function(e){ if(e.key==='Backspace'&&stack.length){ e.preventDefault(); var p=stack.pop(); curPath=p.path; divs={}; map.innerHTML=''; fetchTree(); } });
 fetchTree(); setInterval(fetchTree,600);
 </script>
 </body>
@@ -499,6 +537,29 @@ fetchTree(); setInterval(fetchTree,600);
                     }
                     $bytes = $enc.GetBytes($body)
                     $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: " + $bytes.Length + "`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n")
+                    $stream.Write($head, 0, $head.Length); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
+                }
+                elseif ($target.StartsWith('/open?')) {
+                    $pathVal = ''; $selVal = $false
+                    foreach ($kv in ($target.Substring(6) -split '&')) {
+                        $i = $kv.IndexOf('=')
+                        if ($i -gt 0) {
+                            $k = $kv.Substring(0, $i)
+                            $v = [System.Uri]::UnescapeDataString($kv.Substring($i + 1))
+                            if ($k -eq 'path') { $pathVal = NormPath $v }
+                            if ($k -eq 'sel') { $selVal = ($v -eq '1') }
+                        }
+                    }
+                    $body = '{"error":"bad path"}'
+                    if ($pathVal -and ($pathVal -notlike '*"*') -and (Test-Path -LiteralPath $pathVal)) {
+                        try {
+                            if ($selVal) { Start-Process explorer.exe -ArgumentList ('/select,"' + $pathVal + '"') }
+                            else { Start-Process explorer.exe -ArgumentList ('"' + $pathVal + '"') }
+                            $body = '{"ok":true}'
+                        } catch { $body = '{"error":"' + (EscJson $_.Exception.Message) + '"}' }
+                    }
+                    $bytes = $enc.GetBytes($body)
+                    $head = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: " + $bytes.Length + "`r`nConnection: close`r`nCache-Control: no-store`r`n`r`n")
                     $stream.Write($head, 0, $head.Length); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
                 }
                 elseif ($target -eq '/debug') {
