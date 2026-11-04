@@ -32,6 +32,26 @@ metadata:
 - 参考文档（按需读取）：`references/config-steps.md`（config 步骤执行规范，执行 config 型步骤前必读）、`references/livemap-notes.md`（live map 交互规格与踩坑实录，排障/改 viewer 前必读）
 - manifest：`<reloc根>\manifest.json` — 唯一状态源；配置备份：`<reloc根>\undo\<id>\`
 
+## 可视化交付（audit / discover 必做）
+
+分析必须"看得见"：用户看着方块实时生长，才会信任结果、才能对照可视化决定迁移优先级。
+文字表格只是给 agent 的汇总，**不能代替可视化交付**。
+
+1. 后台启动 live map（不阻塞会话，自动弹浏览器）：
+
+   ```powershell
+   Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','<skill目录>\scripts\Map-Reloc.ps1','-Serve','-Root','C:\','-Port','8734','-Rules','<rules.json>' -WindowStyle Hidden
+   ```
+
+2. 告诉用户打开 http://127.0.0.1:8734/（未自动弹出时），一句话带过交互：单击展开/双击进入/
+   右键打开与复制路径/斜纹=扫描中；交互规格详见 `references/livemap-notes.md`。
+3. 沙箱型 agent（ZCode run_in_background 等）：后台任务对 C:\ 枚举返回空，**必须用上面的
+   Start-Process 脱离沙箱**，或让用户在自己的终端里运行同一命令。
+4. 兜底（端口被占/服务起不来）：静态导出并打开——
+   `Map-Reloc.ps1 -Root C:\ -Depth 4 -MinMB 50 -Out <临时目录>\map.html`，然后
+   `Start-Process <临时目录>\map.html`。
+5. 文字报告作为汇总与建议；迁移优先级引导用户对照可视化结果自行判断。
+
 ## 进程处理规范
 
 迁移被 `-BlockProcesses` 拒绝时：
@@ -68,25 +88,24 @@ manifest 不存在时：
 读 manifest，汇报每条迁移状态（active / backup-pending / copy-done / undone / failed）。
 
 ### audit（只读）
-`Scan-Reloc.ps1 -Rules <rules.json> -Manifest <manifest>` 规则库体检 → 输出建议表
-（条目 / 机制 / 体积 / 风险 / 建议）。新发现的可迁条目先补进 `rules.json` 再 migrate。
+1. `Scan-Reloc.ps1 -Rules <rules.json> -Manifest <manifest>` 规则库体检。
+2. **可视化交付**（见上节）——用户边看边听结论。
+3. 输出建议表（条目 / 机制 / 体积 / 风险 / 建议）。新发现的可迁条目先补进 `rules.json` 再 migrate。
 
 ### discover（只读）
-1. 规则库之外的长尾：`Scan-Reloc.ps1 ... -TopDirs -Top 30` 对 `%LOCALAPPDATA%`、`%APPDATA%`、
+1. **先启动可视化交付**（见「可视化交付」节）——用户实时观看全盘扫描生长。
+2. 规则库之外的长尾：`Scan-Reloc.ps1 ... -TopDirs -Top 30` 对 `%LOCALAPPDATA%`、`%APPDATA%`、
    `%USERPROFILE%` 做子目录体积排行（慢时先 `-SkipSizes`）。
-2. 全盘视角（SpaceSniffer 式）：`Map-Reloc.ps1 -Serve -Root C:\ -Port 8734 -Rules <rules.json>`
-   SSE 流式 treemap——方块实时生长、单击展开/双击进入、右键打开/复制路径、counting 斜纹、
-   文件灰目录彩。⚠️ ZCode 沙箱对 C:\ 枚举返回空，须 `Start-Process powershell ... -WindowStyle Hidden`
-   脱离沙箱启动。静态导出：同脚本 `-Out map.html`。交互规格与排障详见
+3. 全盘视角细节（SpaceSniffer 式交互/SSE 数据链路）：`Map-Reloc.ps1 -Serve -Root C:\ -Port 8734 -Rules <rules.json>`，交互规格与排障详见
    `references/livemap-notes.md`。
-3. 大目录**归属识别**（从强到弱）：名字即线索（`%LOCALAPPDATA%\<App>`）→ 目录内找标记
+4. 大目录**归属识别**（从强到弱）：名字即线索（`%LOCALAPPDATA%\<App>`）→ 目录内找标记
    （.exe 属性 / config / 日志）→ 反查注册表卸载表（HKLM/HKCU `...\Uninstall` 的
    `InstallLocation`/`DisplayIcon`）→ 联网检索 `<目录名> AppData folder which software`。
-4. **可迁移性分析**（可选）：归属已知但机制不明且价值高（GB 级）时，用 reverse-engineer-anything
+5. **可迁移性分析**（可选）：归属已知但机制不明且价值高（GB 级）时，用 reverse-engineer-anything
    对安装器/主程序做静态逆向（硬编码路径常量、环境变量、注册表键值），结论写进 rules.json notes。
-5. **分类判断**：数据/缓存（无 .exe、有写入）→ config 优先；程序本体（含 .exe/运行时）→
+6. **分类判断**：数据/缓存（无 .exe、有写入）→ config 优先；程序本体（含 .exe/运行时）→
    junction（风险升一级）；系统/托管 → deny。不确定的一律 risk=medium（migrate 前必问用户）。
-6. 输出**提案表**（目录/归属/体积/机制/风险/依据），用户逐条确认后写 rules.json 再 migrate；
+7. 输出**提案表**（目录/归属/体积/机制/风险/依据），用户逐条确认后写 rules.json 再 migrate；
    未确认的只记录在案。`audit`/`discover` 均只读，唯一写操作是经确认的 rules.json 更新。
 
 ### migrate `<id>`
