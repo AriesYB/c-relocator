@@ -634,7 +634,9 @@ function render(){
   var items=(node.c||[]);
   var tot=0; for(var q=0;q<items.length;q++) tot+=items[q].s;
   var wait = document.getElementById('wait');
-  wait.style.display = (items.length&&tot>0)? 'none':'flex';
+  if(items.length&&tot>0){ wait.style.display='none'; }
+  else if(node.done){ wait.style.display='flex'; wait.innerHTML='<div><div style="margin-bottom:10px">'+esc(node.n)+'</div><div style="color:#8a8a8a">空目录，或全部子项已折叠进“剩余”条</div></div>'; }
+  else { wait.style.display='flex'; }
   var seen={};
   layoutInto(node,0,0,W,H,curPath,seen);
   for(var key in divs){ if(!seen[key]){ var old=divs[key]; old.style.opacity='0';
@@ -764,6 +766,7 @@ function subscribe(){
 map.addEventListener('click',function(){ goUp(); });
 window.addEventListener('resize',function(){ render(); });
 document.addEventListener('keydown',function(e){
+  if(e.target&&(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')) return;
   if(e.key==='Backspace'&&stack.length){ e.preventDefault(); goUp(); }
   if(e.key==='Escape'){ hideCtx();
     if(Object.keys(expanded).length){ expanded={}; render(); subscribe(); } }
