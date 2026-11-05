@@ -372,9 +372,10 @@ if ($Serve) {
   .cell.expd{border:1px solid #ffd479}
   .cell.counting>.lbl{color:#ffd479}
   .cell.counting::after{content:'';position:absolute;left:0;top:0;right:0;bottom:0;pointer-events:none;
-    background:repeating-linear-gradient(45deg,rgba(255,255,255,0) 0 18px,rgba(255,255,255,.05) 18px 36px);
-    animation:scanmv 2.4s linear infinite}
-  @keyframes scanmv{to{background-position:50.91px 0}}
+    animation:cpulse 2.8s ease-in-out infinite}
+  @keyframes cpulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.22)}}
+  .cell.counting .badge{width:11px;height:11px;border:2px solid rgba(255,212,121,.25);border-top-color:#ffd479;
+    border-radius:50%;animation:spin .8s linear infinite;top:5px;right:5px}
   .cell.expd>.lbl{left:0;top:0;right:0;height:15px;line-height:15px;padding:0 4px;
                   background:rgba(10,10,10,.72);border-bottom:1px solid #b8860b;overflow:hidden}
   .cell .lbl{position:absolute;left:4px;top:2px;right:4px;pointer-events:none;
@@ -520,7 +521,7 @@ function paintCell(d,o,x,y,w,h,pth,kk,seen,ci){
   lbl.style.fontSize=(w>180&&h>50)?'14px':'11px';
   lbl.style.paddingLeft=expanded[pth]?
     (4+Math.max(0,pth.split('\\').length-curPath.split('\\').length)*12)+'px':'';
-  d.querySelector('.badge').textContent=o.n.done?'':'...';
+  d.querySelector('.badge').textContent='';
   seen[kk]=1;
 }
 function stableOrder(arr,keyBase){
