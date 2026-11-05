@@ -372,9 +372,9 @@ if ($Serve) {
   .cell.expd{border:1px solid #ffd479}
   .cell.counting>.lbl{color:#ffd479}
   .cell.counting::after{content:'';position:absolute;left:0;top:0;right:0;bottom:0;pointer-events:none;
-    background:repeating-linear-gradient(45deg,rgba(255,255,255,0) 0 8px,rgba(255,255,255,.07) 8px 16px);
-    animation:scanmv .8s linear infinite}
-  @keyframes scanmv{to{background-position:22.63px 0}}
+    background:repeating-linear-gradient(45deg,rgba(255,255,255,0) 0 18px,rgba(255,255,255,.05) 18px 36px);
+    animation:scanmv 2.4s linear infinite}
+  @keyframes scanmv{to{background-position:50.91px 0}}
   .cell.expd>.lbl{left:0;top:0;right:0;height:15px;line-height:15px;padding:0 4px;
                   background:rgba(10,10,10,.72);border-bottom:1px solid #b8860b;overflow:hidden}
   .cell .lbl{position:absolute;left:4px;top:2px;right:4px;pointer-events:none;
